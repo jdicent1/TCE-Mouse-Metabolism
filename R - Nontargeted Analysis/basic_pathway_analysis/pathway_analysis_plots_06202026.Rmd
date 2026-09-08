@@ -1,0 +1,311 @@
+---
+title: "Pathway Analysis Plots"
+author: "Jocelyn Dicent"
+date: "2026-06-20"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(tidyverse)
+library(janitor)
+library(ggplot2)
+library(scales)
+```
+
+#Reading in the Data
+``` {r read in the data - brain}
+#First, read in the data from MetaboAnalyst functional analysis module. "mm" means mixed mode and "pe" means pathway enrichment. I used gsub to clean a few pathway names after reading in the data and inspecting it.
+
+brain_mm_biocyc_pe <- read_csv("/Volumes/Mass Spec/Updated Nontargeted Analysis - 06202026/Updated Nontargeted Analysis - Metaboanalyst Data/Brain Mixed Mode/biocyc_all/mummichog_pathway_enrichment_mummichog.csv") %>%
+  rename(pathway = "...1") %>%
+  clean_names() %>%
+  mutate(pathway = gsub("</?i>", "", pathway),
+         pathway = gsub("&beta;-alanine degradation I", "beta-alanine degradation I", pathway))
+
+brain_mm_kegg_pe <- read_csv("/Volumes/Mass Spec/Updated Nontargeted Analysis - 06202026/Updated Nontargeted Analysis - Metaboanalyst Data/Brain Mixed Mode/kegg_all/mummichog_pathway_enrichment_mummichog.csv") %>%
+  rename(pathway = "...1") %>%
+  clean_names() %>%
+  mutate(pathway = gsub("</?i>", "", pathway))
+```
+
+``` {r read in the data - liver}
+liver_mm_biocyc_pe <- read_csv("/Volumes/Mass Spec/Updated Nontargeted Analysis - 06202026/Updated Nontargeted Analysis - Metaboanalyst Data/Liver Mixed Mode/biocyc_all/mummichog_pathway_enrichment_mummichog.csv") %>%
+  rename(pathway = "...1") %>%
+  clean_names() %>%
+  mutate(pathway = gsub("</?i>", "", pathway))
+
+liver_mm_kegg_pe <- read_csv("/Volumes/Mass Spec/Updated Nontargeted Analysis - 06202026/Updated Nontargeted Analysis - Metaboanalyst Data/Liver Mixed Mode/kegg_all/mummichog_pathway_enrichment_mummichog.csv") %>%
+  rename(pathway = "...1") %>%
+  clean_names() %>%
+  mutate(pathway = gsub("</?i>", "", pathway))
+```
+
+#Calculations for Remaking Plots
+``` {r calculating enrichment factor and -log10p - both matrices}
+#Using MetaboAnalyst, it generates plots with 4 dimensions: -log10(p) (y-axis), "radi.vec" (size), -log10(p) (color), and enrichment factor (x-axis). radi.vec and enrichment factor are not exported with the MetaboAnalyst data. Enrichment factor was calculated, while radi.vec was omitted since no information about how it is calculated internally could be found.
+
+additional_variables <- function(df) {
+  df %>%
+    mutate(
+    enrichment_factor = hits_sig / expected,
+    neg_log10_p = -log10(p_fisher),
+    enrichment_type = if_else(enrichment_factor < 1, "Under-Enriched", "Over-Enriched")
+  )
+}
+
+brain_mm_biocyc_pe <- additional_variables(brain_mm_biocyc_pe)
+brain_mm_kegg_pe <- additional_variables(brain_mm_kegg_pe)
+
+liver_mm_biocyc_pe <- additional_variables(liver_mm_biocyc_pe)
+liver_mm_kegg_pe <- additional_variables(liver_mm_kegg_pe)
+```
+
+``` {r filtering the datasets into over and under enriched data sets - brain}
+#Data was originally split into under and over enriched datasets for visualization purposes, but found to be unnecessary.
+
+#Brain MM biocyc
+under_enriched_brain_mm_biocyc_pe <- brain_mm_biocyc_pe %>%
+  filter(
+    enrichment_factor < 1
+  ) %>%
+  arrange(desc(enrichment_factor)) 
+
+over_enriched_brain_mm_biocyc_pe <- brain_mm_biocyc_pe %>%
+  filter(
+    enrichment_factor > 1
+  ) %>%
+  arrange(desc(enrichment_factor)) 
+
+#Brain MM KEGG
+under_enriched_brain_mm_kegg_pe <- brain_mm_kegg_pe %>%
+  filter(
+    enrichment_factor < 1
+  ) %>%
+  arrange(desc(enrichment_factor)) 
+
+over_enriched_brain_mm_kegg_pe <- brain_mm_kegg_pe %>%
+  filter(
+    enrichment_factor > 1
+  ) %>%
+  arrange(desc(enrichment_factor)) 
+```
+
+``` {r filtering the datasets into over and under enriched data sets - liver}
+#Liver MM Biocyc
+under_enriched_liver_mm_biocyc_pe <- liver_mm_biocyc_pe %>%
+  filter(
+    enrichment_factor < 1
+  ) %>%
+  arrange(desc(enrichment_factor)) 
+
+over_enriched_liver_mm_biocyc_pe <- liver_mm_biocyc_pe %>%
+  filter(
+    enrichment_factor > 1
+  ) %>%
+  arrange(desc(enrichment_factor)) 
+
+#Liver MM KEGG
+under_enriched_liver_mm_kegg_pe <- liver_mm_kegg_pe %>%
+  filter(
+    enrichment_factor < 1
+  ) %>%
+  arrange(desc(enrichment_factor)) 
+
+over_enriched_liver_mm_kegg_pe <- liver_mm_kegg_pe %>%
+  filter(
+    enrichment_factor > 1
+  ) %>%
+  arrange(desc(enrichment_factor)) 
+```
+
+#Bar Plots - BioCyc
+``` {r plotting prep}
+#Prism-style themes
+theme_prism_10 <- theme_bw(base_size = 10) +
+  theme(
+    panel.grid.major = element_blank(),
+    panel.grid.minor = element_blank(),
+    panel.border = element_blank(),
+    axis.line = element_line(color = "black", linewidth = 0.6),
+    axis.ticks = element_line(color = "black", linewidth = 0.6),
+    axis.text = element_text(color = "black"),
+    axis.title = element_text(color = "black"),
+    strip.background = element_rect(fill = "white", color = "black"),
+    strip.text = element_text(color = "black"),
+    legend.key = element_blank(),
+    plot.title = element_text(face = "bold")
+  )
+
+theme_prism_7 <- theme_bw(base_size = 7) +
+  theme(
+    panel.grid.major = element_blank(),
+    panel.grid.minor = element_blank(),
+    panel.border = element_blank(),
+    axis.line = element_line(color = "black", linewidth = 0.6),
+    axis.ticks = element_line(color = "black", linewidth = 0.6),
+    axis.text = element_text(color = "black"),
+    axis.title = element_text(color = "black"),
+    strip.background = element_rect(fill = "white", color = "black"),
+    strip.text = element_text(color = "black"),
+    legend.key = element_blank(),
+    plot.title = element_text(face = "bold")
+  )
+```
+
+#Bar Plots - BioCyc
+``` {r Bar plots - all pathways - brain}
+#Plots were filtered such that only the near significant and significant results are shown.
+
+#Bar plot - all pathways
+brain_mm_biocyc_pe %>%
+  slice_max(neg_log10_p, n = 33) %>%
+  ggplot(aes(
+    x = reorder(pathway, neg_log10_p),
+    y = neg_log10_p,
+    fill = enrichment_factor
+  )) +
+  coord_flip() +
+  geom_col() +
+  scale_fill_gradient(low = "#FFD92F", high = "#D73027", oob = squish) +
+  theme_prism_7 +
+  labs(
+    x = "Pathway",
+    y = "-log10(p)",
+    title = "Enriched BioCyc Pathways in Brain (Mixed Mode) Ranked by Significance",
+    fill = "Enrichment Factor"
+  ) +
+  geom_hline(yintercept = -log10(0.1), linetype = "dashed", color = "blue") +
+  geom_hline(yintercept = -log10(0.05), linetype = "dashed", color = "red")
+
+ggsave(
+  filename = "plots_biocyc/brain_mm_biocyc_pe.png",
+  width = 8,
+  height = 6,
+  dpi = 300
+)
+
+brain_mm_biocyc_pe_alt <- brain_mm_biocyc_pe %>%
+  filter(neg_log10_p > 0.9)
+```
+
+``` {r alternative graph}
+#Bar plot - all pathways
+brain_mm_biocyc_pe_alt %>%
+  slice_max(neg_log10_p, n = 5) %>%
+  ggplot(aes(
+    x = reorder(pathway, neg_log10_p),
+    y = neg_log10_p,
+    fill = enrichment_factor
+  )) +
+  coord_flip() +
+  geom_col() +
+  scale_fill_gradient(low = "#FFD92F", high = "#D73027", oob = squish) +
+  theme_prism_10 +
+  labs(
+    x = "Pathway",
+    y = "-log10(p)",
+    title = "Enriched BioCyc Pathways in Brain (Mixed Mode) Ranked by Significance",
+    fill = "Enrichment Factor"
+  ) +
+  geom_hline(yintercept = -log10(0.1), linetype = "dashed", color = "blue") +
+  geom_hline(yintercept = -log10(0.05), linetype = "dashed", color = "red")
+
+ggsave(
+  filename = "plots_biocyc/brain_mm_biocyc_pe_alt.png",
+  width = 9,
+  height = 5,
+  dpi = 300
+)
+
+brain_mm_biocyc_pe_alt <- brain_mm_biocyc_pe %>%
+  filter(neg_log10_p > -log10(0.05))
+```
+
+``` {r Bar plots - all pathways - liver}
+liver_mm_biocyc_pe %>%
+  slice_max(neg_log10_p, n = 26) %>%
+  ggplot(aes(
+    x = reorder(pathway, neg_log10_p),
+    y = neg_log10_p,
+    fill = enrichment_factor
+  )) +
+  coord_flip() +
+  geom_col() +
+  scale_fill_gradient(low = "#FFD92F", high = "#D73027", oob = squish) +
+  theme_prism_7 +
+  labs(
+    x = "Pathway",
+    y = "-log10(p)",
+    title = "Enriched BioCyc Pathways in Liver (Mixed Mode) Ranked by Significance",
+    fill = "Enrichment Factor"
+  ) +
+  geom_hline(yintercept = -log10(0.1), linetype = "dashed", color = "blue") +
+  geom_hline(yintercept = -log10(0.05), linetype = "dashed", color = "red")
+
+ggsave(
+  filename = "plots_biocyc/liver_mm_biocyc_pe.png",
+  width = 8,
+  height = 5,
+  dpi = 300
+)
+```
+
+#Bar Plots - KEGG
+``` {r bar plots - all pathways - brain}
+brain_mm_kegg_pe %>%
+  slice_max(neg_log10_p, n = 5) %>%
+  ggplot(aes(
+    x = reorder(pathway, neg_log10_p),
+    y = neg_log10_p,
+    fill = enrichment_factor
+  )) +
+  coord_flip() +
+  geom_col() +
+  scale_fill_gradient(low = "#FFD92F", high = "#D73027", limits = c(0, 6), oob = squish) +
+  theme_prism_10 +
+  labs(
+    x = "Pathway",
+    y = "-log10(p)",
+    title = "Enriched KEGG Pathways in Brain (Mixed Mode) Ranked by Significance",
+    fill = "Enrichment Factor"
+  ) +
+  geom_hline(yintercept = -log10(0.05), linetype = "dashed", color = "red") +
+  geom_hline(yintercept = -log10(0.1), linetype = "dashed", color = "blue")
+
+ggsave(
+  filename = "plots_kegg/brain_mm_kegg_pe.png",
+  width = 9,
+  height = 5,
+  dpi = 300
+)
+```
+
+``` {r bar plots - all pathways - liver}
+liver_mm_kegg_pe %>%
+  slice_max(neg_log10_p, n = 11) %>%
+  ggplot(aes(
+    x = reorder(pathway, neg_log10_p),
+    y = neg_log10_p,
+    fill = enrichment_factor
+  )) +
+  coord_flip() +
+  geom_col() +
+  scale_fill_gradient(low = "#FFD92F", high = "#D73027", oob = squish) +
+  theme_prism_10 +
+  labs(
+    x = "Pathway",
+    y = "-log10(p)",
+    title = "Enriched KEGG Pathways in Liver (Mixed Mode) Ranked by Significance",
+    fill = "Enrichment Factor"
+  ) +
+  geom_hline(yintercept = -log10(0.05), linetype = "dashed", color = "red") +
+  geom_hline(yintercept = -log10(0.1), linetype = "dashed", color = "blue")
+
+ggsave(
+  filename = "plots_kegg/liver_mm_kegg_pe.png",
+  width = 9,
+  height = 5,
+  dpi = 300
+)
+```
