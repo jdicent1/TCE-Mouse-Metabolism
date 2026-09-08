@@ -1,0 +1,1964 @@
+---
+title: "TK Modeling for Mouse Study"
+author: "Jocelyn Dicent"
+date: "2026-04-01"
+output: html_document
+---
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(tidyverse)
+library(janitor)
+library(ggplot2)
+library(readr)
+library(readxl)
+```
+
+#Reading in the Predicted Concentrations
+``` {r reading in the predicted concentrations}
+tissue_raw <- read_excel("all_samples_predicted_conc_data_final_tissue.xlsx")
+
+plasma_raw <- read_excel("all_samples_predicted_conc_data_final_plasma.xlsx")
+```
+
+#Separating by Metabolite
+``` {r cleaning the data}
+plasma_cleaned <- plasma_raw %>%
+  mutate(tissue = "pl") %>%
+  select(compound, tissue, treatment, pred_conc)
+
+tissue_cleaned <- tissue_raw %>%
+  select(compound, tissue, treatment, pred_conc)
+
+all_data <- bind_rows(tissue_cleaned, plasma_cleaned)
+```
+
+``` {r preparing for TK modeling}
+all_data_cleaned <- all_data %>% 
+  filter(treatment != "No Exposure") %>%
+  mutate(
+    time = case_when(
+      treatment == "0 hr" ~ 0,
+      treatment == "1 hr" ~ 1,
+      treatment == "2 hr" ~ 2,
+      treatment == "4 hr" ~ 4,
+      treatment == "8 hr" ~ 8,
+      treatment == "24 hr" ~ 24
+    )
+  ) %>%
+#Dropping the negative values, otherwise the modeling will fail
+  mutate(pred_conc = ifelse(pred_conc < 0, 0, pred_conc)) %>%
+  filter(!is.na(pred_conc)) 
+
+all_data_cleaned_summary <- all_data_cleaned %>%
+  group_by(time, tissue, compound) %>%
+  summarise(
+    conc = mean(pred_conc),
+    n = sum(!is.na(pred_conc)),
+    .groups = "drop"
+  )
+```
+
+``` {r separating by metabolite}
+dca <- all_data_cleaned %>%
+  filter(compound == "DCA")
+
+tca <- all_data_cleaned %>%
+  filter(compound == "TCA")
+
+tceoh_gluc <- all_data_cleaned %>%
+  filter(compound == "TCEOH-Gluc")
+```
+
+``` {r Averaging DCA}
+dca_avg <- dca %>%
+  filter(treatment != "No Exposure") %>%  #removing controls
+  group_by(compound, tissue, time) %>%
+  summarise(
+    conc = mean(pred_conc, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+dca_wide <- dca_avg %>%
+  pivot_wider(
+    names_from = tissue,
+    values_from = conc
+  ) %>%
+  rename(
+    Cp = pl,  #plasma
+    Cl = lv,  #liver
+    Cb = rb   #brain
+  ) %>%
+  arrange(time)
+```
+
+``` {r Averaging TCA}
+tca_avg <- tca %>%
+  filter(treatment != "No Exposure") %>%
+  group_by(compound, tissue, time) %>%
+  summarise(
+    conc = mean(pred_conc, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+tca_wide <- tca_avg %>%
+  pivot_wider(
+    names_from = tissue,
+    values_from = conc
+  ) %>%
+  rename(
+    Cp = pl,  
+    Cl = lv,  
+    Cb = rb   
+  ) %>%
+  arrange(time)
+```
+
+``` {r Averaging TCEOH-Gluc}
+tceoh_gluc_avg <- tceoh_gluc %>%
+  filter(treatment != "No Exposure") %>%
+  group_by(compound, tissue, time) %>%
+  summarise(
+    conc = mean(pred_conc, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+tceoh_gluc_wide <- tceoh_gluc_avg %>%
+  pivot_wider(
+    names_from = tissue,
+    values_from = conc
+  ) %>%
+  rename(
+    Cp = pl,  
+    Cl = lv,  
+    Cb = rb   
+  ) %>%
+  arrange(time)
+```
+
+#Compartment Models - DCA
+``` {r cleaning and models - DCA}
+library(deSolve)
+library(dplyr)
+
+#Clean the data
+dca_wide <- dca_wide %>%
+  mutate(
+    Cp = ifelse(is.na(Cp), 0, Cp),
+    Cl = ifelse(is.na(Cl), 0, Cl),
+    Cb = ifelse(is.na(Cb), 0, Cb)
+  )
+
+#Model (liver with formation)
+pk_model <- function(time, state, parms) {
+  with(as.list(c(state, parms)), {
+    
+    #Liver formation
+    formation_l <- kform_liver * time * exp(-kform_decay_liver * time)
+    
+    #ODEs
+    dCp <- - kpl*Cp - kpb*Cp - kel*Cp + klp*Cl + kbp*Cb
+    dCl <- kpl*Cp - klp*Cl + formation_l
+    dCb <- kpb*Cp - kbp*Cb   #NO brain formation
+    
+    list(c(dCp, dCl, dCb))
+  })
+}
+```
+
+``` {r initial conditions and fitted parameters - DCA}
+#Initial conditions
+state <- c(
+  Cp = dca_wide$Cp[1],
+  Cl = dca_wide$Cl[1],
+  Cb = dca_wide$Cb[1]
+)
+
+dca_time_points <- dca_wide$time
+
+#Weighted cost function
+cost_function_weighted <- function(pars) {
+  
+  parms_vector <- c(
+    kpl = pars[1],
+    kpb = pars[2],
+    klp = pars[3],
+    kbp = pars[4],
+    kel = pars[5],
+    kform_liver = pars[6],
+    kform_decay_liver = pars[7]
+  )
+  
+  out <- ode(
+    y = state,
+    times = dca_time_points,
+    func = pk_model,
+    parms = parms_vector
+  )
+  
+  out_df <- as.data.frame(out)
+  
+  Cp_scale <- max(dca_wide$Cp, na.rm = TRUE)
+  Cl_scale <- max(dca_wide$Cl, na.rm = TRUE)
+  Cb_scale <- max(dca_wide$Cb, na.rm = TRUE)
+  
+  res <- sum(
+    ((dca_wide$Cp - out_df$Cp) / Cp_scale)^2 +
+    ((dca_wide$Cl - out_df$Cl) / Cl_scale)^2 +
+    ((dca_wide$Cb - out_df$Cb) / Cb_scale)^2
+  )
+  
+  return(res)
+}
+
+#Trying multiple starting values
+start_list <- list(
+  c(0.5, 0.5, 0.2, 0.05, 0.1, 10, 1.0),
+  c(0.2, 0.3, 0.1, 0.05, 0.05, 20, 1.5),
+  c(0.8, 0.2, 0.3, 0.1, 0.2, 30, 0.8),
+  c(0.3, 0.8, 0.15, 0.03, 0.1, 15, 1.5),
+  c(1.0, 0.4, 0.5, 0.08, 0.3, 25, 0.5),
+  c(0.1, 0.1, 0.1, 0.02, 0.05, 5, 0.5),
+  c(1.5, 0.6, 0.4, 0.1, 0.5, 50, 2.0),
+  c(0.4, 1.0, 0.2, 0.02, 0.1, 8, 0.8),
+  c(0.7, 0.3, 0.6, 0.15, 0.2, 40, 1.2),
+  c(0.25, 0.6, 0.12, 0.04, 0.08, 12, 1.3)
+)
+
+fit_results <- vector("list", length(start_list))
+fit_values <- rep(NA_real_, length(start_list))
+
+for (i in seq_along(start_list)) {
+  fit_try <- try(
+  optim(
+    par = start_list[[i]],
+    fn = cost_function_weighted,
+    lower = rep(0, 7),
+    upper = c(10, 10, 10, 10, 10, 500, 10),
+    method = "L-BFGS-B"
+  ),
+  silent = TRUE
+)
+  
+  if (!inherits(fit_try, "try-error")) {
+    fit_results[[i]] <- fit_try
+    fit_values[i] <- fit_try$value
+  }
+}
+
+#Keep best fit
+best_index <- which.min(fit_values)
+fit_weighted <- fit_results[[best_index]]
+
+#Extract fitted parameters
+fitted_parms <- c(
+  kpl = fit_weighted$par[1],
+  kpb = fit_weighted$par[2],
+  klp = fit_weighted$par[3],
+  kbp = fit_weighted$par[4],
+  kel = fit_weighted$par[5],
+  kform_liver = fit_weighted$par[6],
+  kform_decay_liver = fit_weighted$par[7]
+)
+
+fitted_parms
+fit_weighted$value
+```
+
+``` {r model fitting and plotting - DCA}
+#Simulating the data
+dca_fitted <- ode(
+  y = state,
+  times = dca_time_points,
+  func = pk_model,
+  parms = fitted_parms
+)
+
+dca_fitted_df <- as.data.frame(dca_fitted)
+
+#Plotting
+op <- par(mfrow = c(3, 1), mar = c(3, 4, 2, 1))
+
+#Plasma
+plot(dca_wide$time, dca_wide$Cp, type = "b", pch = 16, col = "black",
+     xlab = "Time (hr)", ylab = "Plasma conc",
+     main = "DCA Plasma")
+lines(dca_fitted_df$time, dca_fitted_df$Cp, col = "black", lty = 2, lwd = 2)
+legend("topright",
+       legend = c("Data", "Model"),
+       col = c("black", "black"),
+       lty = c(1, 2), pch = c(16, NA), bty = "n")
+
+#Liver
+plot(dca_wide$time, dca_wide$Cl, type = "b", pch = 16, col = "red",
+     xlab = "Time (hr)", ylab = "Liver conc",
+     main = "DCA Liver")
+lines(dca_fitted_df$time, dca_fitted_df$Cl, col = "red", lty = 2, lwd = 2)
+legend("topright",
+       legend = c("Data", "Model"),
+       col = c("red", "red"),
+       lty = c(1, 2), pch = c(16, NA), bty = "n")
+
+#Brain
+plot(dca_wide$time, dca_wide$Cb, type = "b", pch = 16, col = "green3",
+     xlab = "Time (hr)", ylab = "Brain conc",
+     main = "DCA Brain")
+lines(dca_fitted_df$time, dca_fitted_df$Cb, col = "green3", lty = 2, lwd = 2)
+legend("topright",
+       legend = c("Data", "Model"),
+       col = c("green3", "green3"),
+       lty = c(1, 2), pch = c(16, NA), bty = "n")
+
+par(op)
+```
+
+``` {r model fit metrics - DCA}
+#Residuals
+res_plasma <- dca_wide$Cp - dca_fitted_df$Cp
+res_liver  <- dca_wide$Cl - dca_fitted_df$Cl
+res_brain  <- dca_wide$Cb - dca_fitted_df$Cb
+
+#RMSE
+rmse_plasma <- sqrt(mean(res_plasma^2, na.rm = TRUE))
+rmse_liver  <- sqrt(mean(res_liver^2, na.rm = TRUE))
+rmse_brain  <- sqrt(mean(res_brain^2, na.rm = TRUE))
+
+#Normalized RMSE
+nrmse_plasma <- rmse_plasma / max(dca_wide$Cp, na.rm = TRUE)
+nrmse_liver  <- rmse_liver  / max(dca_wide$Cl, na.rm = TRUE)
+nrmse_brain  <- rmse_brain  / max(dca_wide$Cb, na.rm = TRUE)
+
+#Pseudo-R2
+r2_plasma <- 1 - sum(res_plasma^2, na.rm = TRUE) / 
+  sum((dca_wide$Cp - mean(dca_wide$Cp, na.rm = TRUE))^2, na.rm = TRUE)
+
+r2_liver <- 1 - sum(res_liver^2, na.rm = TRUE) / 
+  sum((dca_wide$Cl - mean(dca_wide$Cl, na.rm = TRUE))^2, na.rm = TRUE)
+
+r2_brain <- 1 - sum(res_brain^2, na.rm = TRUE) / 
+  sum((dca_wide$Cb - mean(dca_wide$Cb, na.rm = TRUE))^2, na.rm = TRUE)
+```
+
+``` {r half-life calculations - DCA}
+#Plasma effective elimination rate (ALL ways Cp decreases)
+k_eff_plasma <- fitted_parms["kel"] + fitted_parms["kpl"] + fitted_parms["kpb"]
+
+t_half_plasma <- log(2) / k_eff_plasma
+
+#Liver half-life (redistribution back to plasma)
+t_half_liver <- log(2) / fitted_parms["klp"]
+
+#Brain half-life (redistribution back to plasma)
+t_half_brain <- log(2) / fitted_parms["kbp"]
+```
+
+``` {r AUC Calculations - DCA}
+library(pracma)
+
+auc_plasma <- trapz(dca_wide$time, dca_wide$Cp)
+auc_liver  <- trapz(dca_wide$time, dca_wide$Cl)
+auc_brain  <- trapz(dca_wide$time, dca_wide$Cb)
+
+brain_plasma_ratio <- auc_brain / auc_plasma
+liver_plasma_ratio <- auc_liver / auc_plasma
+```
+
+``` {r all values - DCA}
+options(scipen = 999)
+#Rate constants
+dca_rate_constants_df <- tibble(
+  compound = "DCA",
+  parameter = names(fitted_parms),
+  estimate = as.numeric(fitted_parms)
+)
+
+#Tissue summary
+dca_tissue_summary_df <- tibble(
+  compound = "DCA",
+  tissue = c("Plasma", "Liver", "Brain"),
+  half_life_hr = c(t_half_plasma, t_half_liver, t_half_brain),
+  auc = c(auc_plasma, auc_liver, auc_brain),
+  auc_ratio_vs_plasma = c(1, liver_plasma_ratio, brain_plasma_ratio),
+  rmse = c(rmse_plasma, rmse_liver, rmse_brain),
+  nrmse = c(nrmse_plasma, nrmse_liver, nrmse_brain),
+  pseudo_r2 = c(r2_plasma, r2_liver, r2_brain)
+)
+
+#Overall model summary
+dca_model_summary_df <- tibble(
+  compound = "DCA",
+  best_starting_set = best_index,
+  objective_value = fit_weighted$value
+)
+
+#Combined long dataframe
+dca_combined_df <- bind_rows(
+  tibble(
+    compound = "DCA",
+    section = "rate_constant",
+    item = names(fitted_parms),
+    tissue = NA_character_,
+    value = as.numeric(fitted_parms)
+  ),
+  tibble(
+    compound = "DCA",
+    section = "tissue_summary",
+    tissue = c("Plasma", "Liver", "Brain"),
+    half_life_hr = c(t_half_plasma, t_half_liver, t_half_brain),
+    auc = c(auc_plasma, auc_liver, auc_brain),
+    auc_ratio_vs_plasma = c(1, liver_plasma_ratio, brain_plasma_ratio),
+    rmse = c(rmse_plasma, rmse_liver, rmse_brain),
+    nrmse = c(nrmse_plasma, nrmse_liver, nrmse_brain),
+    pseudo_r2 = c(r2_plasma, r2_liver, r2_brain)
+  ) %>%
+    pivot_longer(
+      cols = c(half_life_hr, auc, auc_ratio_vs_plasma, rmse, nrmse, pseudo_r2),
+      names_to = "item",
+      values_to = "value"
+    ),
+  tibble(
+    compound = "DCA",
+    section = "model_summary",
+    item = c("best_starting_set", "objective_value"),
+    tissue = NA_character_,
+    value = c(best_index, fit_weighted$value)
+  )
+)
+```
+
+#Compartment Models - TCA
+``` {r cleaning and models - TCA}
+library(deSolve)
+library(dplyr)
+
+tca_wide <- tca_wide %>%
+  mutate(
+    Cp = ifelse(is.na(Cp), 0, Cp),
+    Cl = ifelse(is.na(Cl), 0, Cl),
+    Cb = ifelse(is.na(Cb), 0, Cb)
+  )
+
+#Model (plasma + liver formation only)
+pk_model <- function(time, state, parms) {
+  with(as.list(c(state, parms)), {
+
+    formation_l <- kform_liver * time * exp(-kform_decay_liver * time)
+    
+    dCp <- - kpl*Cp - kpb*Cp - kel*Cp + klp*Cl + kbp*Cb
+    dCl <- kpl*Cp - klp*Cl + formation_l
+    dCb <- kpb*Cp - kbp*Cb
+    
+    list(c(dCp, dCl, dCb))
+  })
+}
+```
+
+``` {r intial conditions and fitted paramaters - TCA}
+#Initial conditions
+state <- c(
+  Cp = tca_wide$Cp[1],
+  Cl = tca_wide$Cl[1],
+  Cb = tca_wide$Cb[1]
+)
+
+tca_time_points <- tca_wide$time
+
+#Weighted cost function
+cost_function_weighted <- function(pars) {
+  
+  parms_vector <- c(
+    kpl = pars[1],
+    kpb = pars[2],
+    klp = pars[3],
+    kbp = pars[4],
+    kel = pars[5],
+    kform_liver = pars[6],
+    kform_decay_liver = pars[7]
+  )
+  
+  out <- ode(
+    y = state,
+    times = tca_time_points,
+    func = pk_model,
+    parms = parms_vector
+  )
+  
+  out_df <- as.data.frame(out)
+  
+  Cp_scale <- max(tca_wide$Cp, na.rm = TRUE)
+  Cl_scale <- max(tca_wide$Cl, na.rm = TRUE)
+  Cb_scale <- max(tca_wide$Cb, na.rm = TRUE)
+  
+  res <- sum(
+    ((tca_wide$Cp - out_df$Cp) / Cp_scale)^2 +
+    ((tca_wide$Cl - out_df$Cl) / Cl_scale)^2 +
+    ((tca_wide$Cb - out_df$Cb) / Cb_scale)^2
+  )
+  
+  return(res)
+}
+
+#Trying many start values
+start_list <- list(
+  c(0.5, 0.5, 0.2, 0.05, 0.1, 10, 1.0),
+  c(0.2, 0.3, 0.1, 0.05, 0.05, 20, 1.5),
+  c(0.8, 0.2, 0.3, 0.1, 0.2, 30, 0.8),
+  c(0.3, 0.8, 0.15, 0.03, 0.1, 15, 1.5),
+  c(1.0, 0.4, 0.5, 0.08, 0.3, 25, 0.5),
+  c(0.1, 0.1, 0.1, 0.02, 0.05, 5, 0.5),
+  c(1.5, 0.6, 0.4, 0.1, 0.5, 50, 2.0),
+  c(0.4, 1.0, 0.2, 0.02, 0.1, 8, 0.8),
+  c(0.7, 0.3, 0.6, 0.15, 0.2, 40, 1.2),
+  c(0.25, 0.6, 0.12, 0.04, 0.08, 12, 1.3)
+)
+
+fit_results <- vector("list", length(start_list))
+fit_values <- rep(NA_real_, length(start_list))
+
+for (i in seq_along(start_list)) {
+  fit_try <- try(
+  optim(
+    par = start_list[[i]],
+    fn = cost_function_weighted,
+    lower = rep(0, 7),
+    upper = c(10, 10, 10, 10, 10, 500, 10),
+    method = "L-BFGS-B"
+  ),
+  silent = TRUE
+)
+  
+  if (!inherits(fit_try, "try-error")) {
+    fit_results[[i]] <- fit_try
+    fit_values[i] <- fit_try$value
+  }
+}
+
+#Keep best fit
+best_index <- which.min(fit_values)
+fit_weighted <- fit_results[[best_index]]
+
+#Extract fitted parameters
+fitted_parms <- c(
+  kpl = fit_weighted$par[1],
+  kpb = fit_weighted$par[2],
+  klp = fit_weighted$par[3],
+  kbp = fit_weighted$par[4],
+  kel = fit_weighted$par[5],
+  kform_liver = fit_weighted$par[6],
+  kform_decay_liver = fit_weighted$par[7]
+)
+
+fitted_parms
+fit_weighted$value
+```
+
+``` {r model fitting and plotting - TCA}
+#Simulate the data
+tca_fitted <- ode(
+  y = state,
+  times = tca_time_points,
+  func = pk_model,
+  parms = fitted_parms
+)
+
+tca_fitted_df <- as.data.frame(tca_fitted)
+
+#Plotting
+op <- par(mfrow = c(3, 1), mar = c(3, 4, 2, 1))
+
+#Plasma
+plot(tca_wide$time, tca_wide$Cp, type = "b", pch = 16, col = "black",
+     xlab = "Time (hr)", ylab = "Plasma conc",
+     main = "TCA Plasma")
+lines(tca_fitted_df$time, tca_fitted_df$Cp, col = "black", lty = 2, lwd = 2)
+legend("topright",
+       legend = c("Data", "Model"),
+       col = c("black", "black"),
+       lty = c(1, 2), pch = c(16, NA), bty = "n")
+
+#Liver
+plot(tca_wide$time, tca_wide$Cl, type = "b", pch = 16, col = "red",
+     xlab = "Time (hr)", ylab = "Liver conc",
+     main = "TCA Liver")
+lines(tca_fitted_df$time, tca_fitted_df$Cl, col = "red", lty = 2, lwd = 2)
+legend("topright",
+       legend = c("Data", "Model"),
+       col = c("red", "red"),
+       lty = c(1, 2), pch = c(16, NA), bty = "n")
+
+#Brain
+plot(tca_wide$time, tca_wide$Cb, type = "b", pch = 16, col = "green3",
+     xlab = "Time (hr)", ylab = "Brain conc",
+     main = "TCA Brain")
+lines(tca_fitted_df$time, tca_fitted_df$Cb, col = "green3", lty = 2, lwd = 2)
+legend("topright",
+       legend = c("Data", "Model"),
+       col = c("green3", "green3"),
+       lty = c(1, 2), pch = c(16, NA), bty = "n")
+
+par(op)
+```
+
+``` {r model fit metrics - TCA}
+#Residuals
+res_plasma <- tca_wide$Cp - tca_fitted_df$Cp
+res_liver  <- tca_wide$Cl - tca_fitted_df$Cl
+res_brain  <- tca_wide$Cb - tca_fitted_df$Cb
+
+#RMSE
+rmse_plasma <- sqrt(mean(res_plasma^2, na.rm = TRUE))
+rmse_liver  <- sqrt(mean(res_liver^2, na.rm = TRUE))
+rmse_brain  <- sqrt(mean(res_brain^2, na.rm = TRUE))
+
+#Normalized RMSE
+nrmse_plasma <- rmse_plasma / max(tca_wide$Cp, na.rm = TRUE)
+nrmse_liver  <- rmse_liver  / max(tca_wide$Cl, na.rm = TRUE)
+nrmse_brain  <- rmse_brain  / max(tca_wide$Cb, na.rm = TRUE)
+
+#Pseudo-R2
+r2_plasma <- 1 - sum(res_plasma^2, na.rm = TRUE) / 
+  sum((tca_wide$Cp - mean(tca_wide$Cp, na.rm = TRUE))^2, na.rm = TRUE)
+
+r2_liver <- 1 - sum(res_liver^2, na.rm = TRUE) / 
+  sum((tca_wide$Cl - mean(tca_wide$Cl, na.rm = TRUE))^2, na.rm = TRUE)
+
+r2_brain <- 1 - sum(res_brain^2, na.rm = TRUE) / 
+  sum((tca_wide$Cb - mean(tca_wide$Cb, na.rm = TRUE))^2, na.rm = TRUE)
+```
+
+``` {r half-life calculations - TCA}
+k_eff_plasma <- fitted_parms["kel"] + fitted_parms["kpl"] + fitted_parms["kpb"]
+
+t_half_plasma <- log(2) / k_eff_plasma
+t_half_liver  <- log(2) / fitted_parms["klp"]
+t_half_brain  <- log(2) / fitted_parms["kbp"]
+```
+
+``` {r AUC Calculations - TCA}
+library(pracma)
+
+auc_plasma <- trapz(tca_wide$time, tca_wide$Cp)
+auc_liver  <- trapz(tca_wide$time, tca_wide$Cl)
+auc_brain  <- trapz(tca_wide$time, tca_wide$Cb)
+
+brain_plasma_ratio <- auc_brain / auc_plasma
+liver_plasma_ratio <- auc_liver / auc_plasma
+```
+
+``` {r all values - TCA}
+options(scipen = 999)
+#Rate constants
+tca_rate_constants_df <- tibble(
+  compound = "TCA",
+  parameter = names(fitted_parms),
+  estimate = as.numeric(fitted_parms)
+)
+
+#Tissue summary
+tca_tissue_summary_df <- tibble(
+  compound = "TCA",
+  tissue = c("Plasma", "Liver", "Brain"),
+  half_life_hr = c(t_half_plasma, t_half_liver, t_half_brain),
+  auc = c(auc_plasma, auc_liver, auc_brain),
+  auc_ratio_vs_plasma = c(1, liver_plasma_ratio, brain_plasma_ratio),
+  rmse = c(rmse_plasma, rmse_liver, rmse_brain),
+  nrmse = c(nrmse_plasma, nrmse_liver, nrmse_brain),
+  pseudo_r2 = c(r2_plasma, r2_liver, r2_brain)
+)
+
+#Overall model summary
+tca_model_summary_df <- tibble(
+  compound = "TCA",
+  best_starting_set = best_index,
+  objective_value = fit_weighted$value
+)
+
+#Combined long dataframe
+tca_combined_df <- bind_rows(
+  tibble(
+    compound = "TCA",
+    section = "rate_constant",
+    item = names(fitted_parms),
+    tissue = NA_character_,
+    value = as.numeric(fitted_parms)
+  ),
+  tibble(
+    compound = "TCA",
+    section = "tissue_summary",
+    tissue = c("Plasma", "Liver", "Brain"),
+    half_life_hr = c(t_half_plasma, t_half_liver, t_half_brain),
+    auc = c(auc_plasma, auc_liver, auc_brain),
+    auc_ratio_vs_plasma = c(1, liver_plasma_ratio, brain_plasma_ratio),
+    rmse = c(rmse_plasma, rmse_liver, rmse_brain),
+    nrmse = c(nrmse_plasma, nrmse_liver, nrmse_brain),
+    pseudo_r2 = c(r2_plasma, r2_liver, r2_brain)
+  ) %>%
+    pivot_longer(
+      cols = c(half_life_hr, auc, auc_ratio_vs_plasma, rmse, nrmse, pseudo_r2),
+      names_to = "item",
+      values_to = "value"
+    ),
+  tibble(
+    compound = "TCA",
+    section = "model_summary",
+    item = c("best_starting_set", "objective_value"),
+    tissue = NA_character_,
+    value = c(best_index, fit_weighted$value)
+  )
+)
+```
+
+#Compartment Models - TCEOH-Gluc
+``` {r cleaning and models - TCEOH-Gluc}
+library(deSolve)
+library(dplyr)
+
+tceoh_gluc_wide <- tceoh_gluc_wide %>%
+  mutate(
+    Cp = ifelse(is.na(Cp), 0, Cp),
+    Cl = ifelse(is.na(Cl), 0, Cl),
+    Cb = ifelse(is.na(Cb), 0, Cb)
+  )
+
+#PK model with liver formation term
+pk_model <- function(time, state, parms) {
+  with(as.list(c(state, parms)), {
+    
+    formation_l <- kform_liver * time * exp(-kform_decay_liver * time)
+    
+    dCp <- -kpl * Cp - kpb * Cp - kel * Cp + klp * Cl + kbp * Cb
+    dCl <-  kpl * Cp - klp * Cl + formation_l
+    dCb <-  kpb * Cp - kbp * Cb
+    
+    list(c(dCp, dCl, dCb))
+  })
+}
+```
+
+``` {r initial conditions and fitted parameters - TCEOH-Gluc}
+#Initial conditions
+state <- c(
+  Cp = tceoh_gluc_wide$Cp[1],
+  Cl = tceoh_gluc_wide$Cl[1],
+  Cb = tceoh_gluc_wide$Cb[1]
+)
+
+tceoh_gluc_time_points <- tceoh_gluc_wide$time
+
+#Weighted cost function
+cost_function_weighted <- function(pars) {
+  
+  parms_vector <- c(
+    kpl = pars[1],
+    kpb = pars[2],
+    klp = pars[3],
+    kbp = pars[4],
+    kel = pars[5],
+    kform_liver = pars[6],
+    kform_decay_liver = pars[7]
+  )
+  
+  out <- ode(
+    y = state,
+    times = tceoh_gluc_time_points,
+    func = pk_model,
+    parms = parms_vector
+  )
+  
+  out_df <- as.data.frame(out)
+  
+  Cp_scale <- max(tceoh_gluc_wide$Cp, na.rm = TRUE)
+  Cl_scale <- max(tceoh_gluc_wide$Cl, na.rm = TRUE)
+  Cb_scale <- max(tceoh_gluc_wide$Cb, na.rm = TRUE)
+  
+  res <- sum(
+    ((tceoh_gluc_wide$Cp - out_df$Cp) / Cp_scale)^2 +
+    ((tceoh_gluc_wide$Cl - out_df$Cl) / Cl_scale)^2 +
+    ((tceoh_gluc_wide$Cb - out_df$Cb) / Cb_scale)^2
+  )
+  
+  return(res)
+}
+
+#Try multiple starting values
+start_list <- list(
+  c(0.5, 0.5, 0.2, 0.05, 0.1, 10, 1.0),
+  c(0.2, 0.3, 0.1, 0.05, 0.05, 20, 1.5),
+  c(0.8, 0.2, 0.3, 0.1, 0.2, 30, 0.8),
+  c(0.3, 0.8, 0.15, 0.03, 0.1, 15, 1.5),
+  c(1.0, 0.4, 0.5, 0.08, 0.3, 25, 0.5),
+  c(0.1, 0.1, 0.1, 0.02, 0.05, 5, 0.5),
+  c(1.5, 0.6, 0.4, 0.1, 0.5, 50, 2.0),
+  c(0.4, 1.0, 0.2, 0.02, 0.1, 8, 0.8),
+  c(0.7, 0.3, 0.6, 0.15, 0.2, 40, 1.2),
+  c(0.25, 0.6, 0.12, 0.04, 0.08, 12, 1.3)
+)
+
+fit_results <- vector("list", length(start_list))
+fit_values <- rep(NA_real_, length(start_list))
+
+for (i in seq_along(start_list)) {
+  fit_try <- try(
+  optim(
+    par = start_list[[i]],
+    fn = cost_function_weighted,
+    lower = rep(0, 7),
+    upper = c(10, 10, 10, 10, 10, 500, 10),
+    method = "L-BFGS-B"
+  ),
+  silent = TRUE
+)
+  
+  if (!inherits(fit_try, "try-error")) {
+    fit_results[[i]] <- fit_try
+    fit_values[i] <- fit_try$value
+  }
+}
+
+best_index <- which.min(fit_values)
+fit_weighted <- fit_results[[best_index]]
+
+#Extract fitted parameters
+fitted_parms <- c(
+  kpl = fit_weighted$par[1],
+  kpb = fit_weighted$par[2],
+  klp = fit_weighted$par[3],
+  kbp = fit_weighted$par[4],
+  kel = fit_weighted$par[5],
+  kform_liver = fit_weighted$par[6],
+  kform_decay_liver = fit_weighted$par[7]
+)
+
+fitted_parms
+fit_weighted$value
+```
+
+``` {r model fitting and plotting - TCEOH-Gluc}
+#Simulate the data
+tceoh_gluc_fitted <- ode(
+  y = state,
+  times = tceoh_gluc_time_points,
+  func = pk_model,
+  parms = fitted_parms
+)
+
+tceoh_gluc_fitted_df <- as.data.frame(tceoh_gluc_fitted)
+
+#Plotting
+op <- par(mfrow = c(3, 1), mar = c(3, 4, 2, 1))
+
+#Plasma
+plot(tceoh_gluc_wide$time, tceoh_gluc_wide$Cp, type = "b", pch = 16, col = "black",
+     xlab = "Time (hr)", ylab = "Plasma conc",
+     main = "TCEOH-Gluc Plasma")
+lines(tceoh_gluc_fitted_df$time, tceoh_gluc_fitted_df$Cp, col = "black", lty = 2, lwd = 2)
+legend("topright",
+       legend = c("Data", "Model"),
+       col = c("black", "black"),
+       lty = c(1, 2), pch = c(16, NA), bty = "n")
+
+#Liver
+plot(tceoh_gluc_wide$time, tceoh_gluc_wide$Cl, type = "b", pch = 16, col = "red",
+     xlab = "Time (hr)", ylab = "Liver conc",
+     main = "TCEOH-Gluc Liver")
+lines(tceoh_gluc_fitted_df$time, tceoh_gluc_fitted_df$Cl, col = "red", lty = 2, lwd = 2)
+legend("topright",
+       legend = c("Data", "Model"),
+       col = c("red", "red"),
+       lty = c(1, 2), pch = c(16, NA), bty = "n")
+
+#Brain
+plot(tceoh_gluc_wide$time, tceoh_gluc_wide$Cb, type = "b", pch = 16, col = "green3",
+     xlab = "Time (hr)", ylab = "Brain conc",
+     main = "TCEOH-Gluc Brain")
+lines(tceoh_gluc_fitted_df$time, tceoh_gluc_fitted_df$Cb, col = "green3", lty = 2, lwd = 2)
+legend("topright",
+       legend = c("Data", "Model"),
+       col = c("green3", "green3"),
+       lty = c(1, 2), pch = c(16, NA), bty = "n")
+
+par(op)
+```
+
+``` {r model fit metrics - TCEOH-Gluc}
+#Residuals
+res_plasma <- tceoh_gluc_wide$Cp - tceoh_gluc_fitted_df$Cp
+res_liver  <- tceoh_gluc_wide$Cl - tceoh_gluc_fitted_df$Cl
+res_brain  <- tceoh_gluc_wide$Cb - tceoh_gluc_fitted_df$Cb
+
+#RMSE
+rmse_plasma <- sqrt(mean(res_plasma^2, na.rm = TRUE))
+rmse_liver  <- sqrt(mean(res_liver^2, na.rm = TRUE))
+rmse_brain  <- sqrt(mean(res_brain^2, na.rm = TRUE))
+
+#Normalized RMSE
+nrmse_plasma <- rmse_plasma / max(tceoh_gluc_wide$Cp, na.rm = TRUE)
+nrmse_liver  <- rmse_liver  / max(tceoh_gluc_wide$Cl, na.rm = TRUE)
+nrmse_brain  <- rmse_brain  / max(tceoh_gluc_wide$Cb, na.rm = TRUE)
+
+#Pseudo-R2
+r2_plasma <- 1 - sum(res_plasma^2, na.rm = TRUE) / 
+  sum((tceoh_gluc_wide$Cp - mean(tceoh_gluc_wide$Cp, na.rm = TRUE))^2, na.rm = TRUE)
+
+r2_liver <- 1 - sum(res_liver^2, na.rm = TRUE) / 
+  sum((tceoh_gluc_wide$Cl - mean(tceoh_gluc_wide$Cl, na.rm = TRUE))^2, na.rm = TRUE)
+
+r2_brain <- 1 - sum(res_brain^2, na.rm = TRUE) / 
+  sum((tceoh_gluc_wide$Cb - mean(tceoh_gluc_wide$Cb, na.rm = TRUE))^2, na.rm = TRUE)
+```
+
+``` {r half-life calculations - TCEOH-Gluc}
+k_eff_plasma <- fitted_parms["kel"] + fitted_parms["kpl"] + fitted_parms["kpb"]
+
+t_half_plasma <- log(2) / k_eff_plasma
+t_half_liver  <- log(2) / fitted_parms["klp"]
+t_half_brain  <- log(2) / fitted_parms["kbp"]
+```
+
+``` {r AUC Calculations - TCEOH-Gluc}
+library(pracma)
+
+auc_plasma <- trapz(tceoh_gluc_wide$time, tceoh_gluc_wide$Cp)
+auc_liver  <- trapz(tceoh_gluc_wide$time, tceoh_gluc_wide$Cl)
+auc_brain  <- trapz(tceoh_gluc_wide$time, tceoh_gluc_wide$Cb)
+
+brain_plasma_ratio <- auc_brain / auc_plasma
+liver_plasma_ratio <- auc_liver / auc_plasma
+```
+
+``` {r all values - TCEOH-Gluc}
+options(scipen = 999)
+#Rate constants
+tceoh_gluc_rate_constants_df <- tibble(
+  compound = "TCEOH-Gluc",
+  parameter = names(fitted_parms),
+  estimate = as.numeric(fitted_parms)
+)
+
+#Tissue summary
+tceoh_gluc_tissue_summary_df <- tibble(
+  compound = "TCEOH-Gluc",
+  tissue = c("Plasma", "Liver", "Brain"),
+  half_life_hr = c(t_half_plasma, t_half_liver, t_half_brain),
+  auc = c(auc_plasma, auc_liver, auc_brain),
+  auc_ratio_vs_plasma = c(1, liver_plasma_ratio, brain_plasma_ratio),
+  rmse = c(rmse_plasma, rmse_liver, rmse_brain),
+  nrmse = c(nrmse_plasma, nrmse_liver, nrmse_brain),
+  pseudo_r2 = c(r2_plasma, r2_liver, r2_brain)
+)
+
+#Overall model summary
+tceoh_gluc_model_summary_df <- tibble(
+  compound = "TCEOH-Gluc",
+  best_starting_set = best_index,
+  objective_value = fit_weighted$value
+)
+
+#Combined long dataframe
+tceoh_gluc_combined_df <- bind_rows(
+  tibble(
+    compound = "TCEOH-Gluc",
+    section = "rate_constant",
+    item = names(fitted_parms),
+    tissue = NA_character_,
+    value = as.numeric(fitted_parms)
+  ),
+  tibble(
+    compound = "TCEOH-Gluc",
+    section = "tissue_summary",
+    tissue = c("Plasma", "Liver", "Brain"),
+    half_life_hr = c(t_half_plasma, t_half_liver, t_half_brain),
+    auc = c(auc_plasma, auc_liver, auc_brain),
+    auc_ratio_vs_plasma = c(1, liver_plasma_ratio, brain_plasma_ratio),
+    rmse = c(rmse_plasma, rmse_liver, rmse_brain),
+    nrmse = c(nrmse_plasma, nrmse_liver, nrmse_brain),
+    pseudo_r2 = c(r2_plasma, r2_liver, r2_brain)
+  ) %>%
+    pivot_longer(
+      cols = c(half_life_hr, auc, auc_ratio_vs_plasma, rmse, nrmse, pseudo_r2),
+      names_to = "item",
+      values_to = "value"
+    ),
+  tibble(
+    compound = "TCEOH-Gluc",
+    section = "model_summary",
+    item = c("best_starting_set", "objective_value"),
+    tissue = NA_character_,
+    value = c(best_index, fit_weighted$value)
+  )
+)
+```
+
+#All Values Across Compounds
+``` {r combining datasets}
+final_all_values <- bind_rows(dca_combined_df, tca_combined_df, tceoh_gluc_combined_df) %>%
+  mutate(value = round(value, 4))
+```
+
+#Nine Panel Graph
+``` {r adding all data to one dataframe}
+library(dplyr)
+library(tidyr)
+
+#Observed data
+obs_long <- bind_rows(
+  dca_wide %>% mutate(compound = "DCA"),
+  tca_wide %>% mutate(compound = "TCA"),
+  tceoh_gluc_wide %>% mutate(compound = "TCEOH-Gluc")
+) %>%
+  pivot_longer(cols = c(Cp, Cl, Cb),
+               names_to = "tissue",
+               values_to = "conc") %>%
+  mutate(type = "Data") %>%
+  mutate(
+    type = "Data",
+    tissue = recode(tissue,
+                    "Cp" = "Plasma",
+                    "Cl" = "Liver",
+                    "Cb" = "Brain"),
+    tissue = factor(tissue, levels = c("Liver", "Plasma", "Brain"))
+  )
+
+#Model data
+model_long <- bind_rows(
+  dca_fitted_df %>% mutate(compound = "DCA"),
+  tca_fitted_df %>% mutate(compound = "TCA"),
+  tceoh_gluc_fitted_df %>% mutate(compound = "TCEOH-Gluc")
+) %>%
+  pivot_longer(cols = c(Cp, Cl, Cb),
+               names_to = "tissue",
+               values_to = "conc") %>%
+  mutate(type = "Model") %>%
+  mutate(
+    type = "Model",
+    tissue = recode(tissue,
+                    "Cp" = "Plasma",
+                    "Cl" = "Liver",
+                    "Cb" = "Brain"),
+    tissue = factor(tissue, levels = c("Liver", "Plasma", "Brain"))
+  )
+
+#Combine
+plot_df <- bind_rows(obs_long, model_long)
+```
+
+``` {r plot of all compounds and matrices}
+library(ggplot2)
+library(ggh4x)
+
+ggplot(plot_df, aes(x = time, y = conc, color = tissue)) +
+  
+  #Observed data (points + solid lines)
+  geom_point(
+    data = subset(plot_df, type == "Data")
+  ) +
+  geom_line(
+    data = subset(plot_df, type == "Data"),
+    aes(group = interaction(compound, tissue))
+  ) +
+  
+  #Model (ONLY dashed line)
+  geom_line(
+    data = subset(plot_df, type == "Model"),
+    aes(group = interaction(compound, tissue)),
+    linetype = "dashed",
+    linewidth = 1
+  ) +
+  
+  ggh4x::facet_grid2(compound ~ tissue, scales = "free_y", independent = "y") +
+  scale_x_continuous(
+  breaks = seq(0, 24, by = 4),
+  limits = c(0, 25)
+) +
+  scale_color_manual(values = c(
+    "Plasma" = "#000000",
+    "Liver"  = "#0000FF",
+    "Brain"  = "#F50717"
+  )) +
+  
+  labs(
+    x = "Time (hr)",
+    y = "Concentration (uM)",
+    title = "Toxicokinetic Profiles Across Compounds and Tissues"
+  ) +
+  
+  theme_bw() +
+  theme(
+    legend.position = "none",
+    strip.background = element_blank(),
+    strip.text.y = element_text(angle = 0),
+    plot.title = element_text(face = "bold", hjust = 0.5),
+    axis.title = element_text(face = "bold"),
+    strip.text = element_text(face = "bold")
+  )
+
+ggsave(
+  filename = "tk_profiles.jpeg",
+  plot = last_plot(),   
+  width = 10,
+  height = 8,
+  units = "in",
+  dpi = 300
+)
+```
+
+``` {r end}
+library(beepr)
+
+beep()
+
+```
+
+#Sensitivity Analysis - Including Brain Formation
+``` {r full code for dca with brain formation term, eval = FALSE}
+library(deSolve)
+library(dplyr)
+library(tidyr)
+library(tibble)
+library(pracma)
+
+
+#Cleaning and model
+dca_wide <- dca_wide %>%
+  mutate(
+    Cp = ifelse(is.na(Cp), 0, Cp),
+    Cl = ifelse(is.na(Cl), 0, Cl),
+    Cb = ifelse(is.na(Cb), 0, Cb)
+  )
+
+pk_model_dca <- function(time, state, parms) {
+  with(as.list(c(state, parms)), {
+    
+    formation_l <- kform_liver * time * exp(-kform_decay_liver * time)
+    formation_b <- kform_brain * time * exp(-kform_decay_brain * time)
+    
+    dCp <- -kpl * Cp - kpb * Cp - kel * Cp + klp * Cl + kbp * Cb
+    dCl <-  kpl * Cp - klp * Cl + formation_l
+    dCb <-  kpb * Cp - kbp * Cb + formation_b
+    
+    list(c(dCp, dCl, dCb))
+  })
+}
+
+
+#Initial conditions and fitting
+state_dca <- c(
+  Cp = dca_wide$Cp[1],
+  Cl = dca_wide$Cl[1],
+  Cb = dca_wide$Cb[1]
+)
+
+dca_time_points <- dca_wide$time
+
+cost_function_weighted_dca <- function(pars) {
+  
+  parms_vector <- c(
+    kpl = pars[1],
+    kpb = pars[2],
+    klp = pars[3],
+    kbp = pars[4],
+    kel = pars[5],
+    kform_liver = pars[6],
+    kform_decay_liver = pars[7],
+    kform_brain = pars[8],
+    kform_decay_brain = pars[9]
+  )
+  
+  out <- ode(
+    y = state_dca,
+    times = dca_time_points,
+    func = pk_model_dca,
+    parms = parms_vector
+  )
+  
+  out_df <- as.data.frame(out)
+  
+  Cp_scale <- max(dca_wide$Cp, na.rm = TRUE)
+  Cl_scale <- max(dca_wide$Cl, na.rm = TRUE)
+  Cb_scale <- max(dca_wide$Cb, na.rm = TRUE)
+  
+  sum(
+    ((dca_wide$Cp - out_df$Cp) / Cp_scale)^2 +
+    ((dca_wide$Cl - out_df$Cl) / Cl_scale)^2 +
+    ((dca_wide$Cb - out_df$Cb) / Cb_scale)^2
+  )
+}
+
+start_list_dca <- list(
+  c(0.5, 0.5, 0.2, 0.05, 0.1, 10, 1.0, 1, 1.0),
+  c(0.2, 0.3, 0.1, 0.05, 0.05, 20, 1.5, 2, 1.5),
+  c(0.8, 0.2, 0.3, 0.1, 0.2, 30, 0.8, 3, 0.8),
+  c(0.3, 0.8, 0.15, 0.03, 0.1, 15, 1.5, 1.5, 1.2),
+  c(1.0, 0.4, 0.5, 0.08, 0.3, 25, 0.5, 2.5, 0.5),
+  c(0.1, 0.1, 0.1, 0.02, 0.05, 5, 0.5, 0.5, 0.5),
+  c(1.5, 0.6, 0.4, 0.1, 0.5, 50, 2.0, 5, 2.0),
+  c(0.4, 1.0, 0.2, 0.02, 0.1, 8, 0.8, 1, 0.8),
+  c(0.7, 0.3, 0.6, 0.15, 0.2, 40, 1.2, 4, 1.2),
+  c(0.25, 0.6, 0.12, 0.04, 0.08, 12, 1.3, 1.2, 1.3)
+)
+
+fit_results_dca <- vector("list", length(start_list_dca))
+fit_values_dca <- rep(NA_real_, length(start_list_dca))
+
+for (i in seq_along(start_list_dca)) {
+  fit_try <- try(
+    optim(
+      par = start_list_dca[[i]],
+      fn = cost_function_weighted_dca,
+      lower = rep(0, 9),
+      upper = c(10, 10, 10, 10, 10, 500, 10, 500, 10),
+      method = "L-BFGS-B"
+    ),
+    silent = TRUE
+  )
+  
+  if (!inherits(fit_try, "try-error")) {
+    fit_results_dca[[i]] <- fit_try
+    fit_values_dca[i] <- fit_try$value
+  }
+}
+
+best_index_dca <- which.min(fit_values_dca)
+fit_weighted_dca <- fit_results_dca[[best_index_dca]]
+
+fitted_parms_dca <- c(
+  kpl = fit_weighted_dca$par[1],
+  kpb = fit_weighted_dca$par[2],
+  klp = fit_weighted_dca$par[3],
+  kbp = fit_weighted_dca$par[4],
+  kel = fit_weighted_dca$par[5],
+  kform_liver = fit_weighted_dca$par[6],
+  kform_decay_liver = fit_weighted_dca$par[7],
+  kform_brain = fit_weighted_dca$par[8],
+  kform_decay_brain = fit_weighted_dca$par[9]
+)
+
+fitted_parms_dca
+fit_weighted_dca$value
+
+#Model fitting and plotting
+dca_fitted <- ode(
+  y = state_dca,
+  times = dca_time_points,
+  func = pk_model_dca,
+  parms = fitted_parms_dca
+)
+
+dca_fitted_df <- as.data.frame(dca_fitted)
+
+op <- par(mfrow = c(3, 1), mar = c(4, 5, 3, 2))
+
+plot(dca_wide$time, dca_wide$Cp, type = "b", pch = 16, col = "black",
+     xlab = "Time (hr)", ylab = "Plasma conc", main = "DCA Plasma")
+lines(dca_fitted_df$time, dca_fitted_df$Cp, col = "black", lty = 2, lwd = 2)
+legend("topright", legend = c("Data", "Model"),
+       col = c("black", "black"), lty = c(1, 2), pch = c(16, NA), bty = "n")
+
+plot(dca_wide$time, dca_wide$Cl, type = "b", pch = 16, col = "red",
+     xlab = "Time (hr)", ylab = "Liver conc", main = "DCA Liver")
+lines(dca_fitted_df$time, dca_fitted_df$Cl, col = "red", lty = 2, lwd = 2)
+legend("topright", legend = c("Data", "Model"),
+       col = c("red", "red"), lty = c(1, 2), pch = c(16, NA), bty = "n")
+
+plot(dca_wide$time, dca_wide$Cb, type = "b", pch = 16, col = "green3",
+     xlab = "Time (hr)", ylab = "Brain conc", main = "DCA Brain")
+lines(dca_fitted_df$time, dca_fitted_df$Cb, col = "green3", lty = 2, lwd = 2)
+legend("topright", legend = c("Data", "Model"),
+       col = c("green3", "green3"), lty = c(1, 2), pch = c(16, NA), bty = "n")
+
+par(op)
+
+#Model fit metrics
+res_plasma_dca <- dca_wide$Cp - dca_fitted_df$Cp
+res_liver_dca  <- dca_wide$Cl - dca_fitted_df$Cl
+res_brain_dca  <- dca_wide$Cb - dca_fitted_df$Cb
+
+rmse_plasma_dca <- sqrt(mean(res_plasma_dca^2, na.rm = TRUE))
+rmse_liver_dca  <- sqrt(mean(res_liver_dca^2, na.rm = TRUE))
+rmse_brain_dca  <- sqrt(mean(res_brain_dca^2, na.rm = TRUE))
+
+nrmse_plasma_dca <- rmse_plasma_dca / max(dca_wide$Cp, na.rm = TRUE)
+nrmse_liver_dca  <- rmse_liver_dca  / max(dca_wide$Cl, na.rm = TRUE)
+nrmse_brain_dca  <- rmse_brain_dca  / max(dca_wide$Cb, na.rm = TRUE)
+
+r2_plasma_dca <- 1 - sum(res_plasma_dca^2, na.rm = TRUE) /
+  sum((dca_wide$Cp - mean(dca_wide$Cp, na.rm = TRUE))^2, na.rm = TRUE)
+
+r2_liver_dca <- 1 - sum(res_liver_dca^2, na.rm = TRUE) /
+  sum((dca_wide$Cl - mean(dca_wide$Cl, na.rm = TRUE))^2, na.rm = TRUE)
+
+r2_brain_dca <- 1 - sum(res_brain_dca^2, na.rm = TRUE) /
+  sum((dca_wide$Cb - mean(dca_wide$Cb, na.rm = TRUE))^2, na.rm = TRUE)
+
+#Half-life calculations
+k_eff_plasma_dca <- fitted_parms_dca["kel"] + fitted_parms_dca["kpl"] + fitted_parms_dca["kpb"]
+
+t_half_plasma_dca <- log(2) / k_eff_plasma_dca
+t_half_liver_dca  <- log(2) / fitted_parms_dca["klp"]
+t_half_brain_dca  <- log(2) / fitted_parms_dca["kbp"]
+
+#AUC calculations
+auc_plasma_dca <- trapz(dca_wide$time, dca_wide$Cp)
+auc_liver_dca  <- trapz(dca_wide$time, dca_wide$Cl)
+auc_brain_dca  <- trapz(dca_wide$time, dca_wide$Cb)
+
+brain_plasma_ratio_dca <- auc_brain_dca / auc_plasma_dca
+liver_plasma_ratio_dca <- auc_liver_dca / auc_plasma_dca
+
+#All values
+options(scipen = 999)
+
+dca_rate_constants_df <- tibble(
+  compound = "DCA",
+  parameter = names(fitted_parms_dca),
+  estimate = as.numeric(fitted_parms_dca)
+)
+
+dca_tissue_summary_df <- tibble(
+  compound = "DCA",
+  tissue = c("Plasma", "Liver", "Brain"),
+  half_life_hr = c(t_half_plasma_dca, t_half_liver_dca, t_half_brain_dca),
+  auc = c(auc_plasma_dca, auc_liver_dca, auc_brain_dca),
+  auc_ratio_vs_plasma = c(1, liver_plasma_ratio_dca, brain_plasma_ratio_dca),
+  rmse = c(rmse_plasma_dca, rmse_liver_dca, rmse_brain_dca),
+  nrmse = c(nrmse_plasma_dca, nrmse_liver_dca, nrmse_brain_dca),
+  pseudo_r2 = c(r2_plasma_dca, r2_liver_dca, r2_brain_dca)
+)
+
+dca_model_summary_df <- tibble(
+  compound = "DCA",
+  best_starting_set = best_index_dca,
+  objective_value = fit_weighted_dca$value
+)
+
+dca_combined_df <- bind_rows(
+  tibble(
+    compound = "DCA",
+    section = "rate_constant",
+    item = names(fitted_parms_dca),
+    tissue = NA_character_,
+    value = as.numeric(fitted_parms_dca)
+  ),
+  tibble(
+    compound = "DCA",
+    section = "tissue_summary",
+    tissue = c("Plasma", "Liver", "Brain"),
+    half_life_hr = c(t_half_plasma_dca, t_half_liver_dca, t_half_brain_dca),
+    auc = c(auc_plasma_dca, auc_liver_dca, auc_brain_dca),
+    auc_ratio_vs_plasma = c(1, liver_plasma_ratio_dca, brain_plasma_ratio_dca),
+    rmse = c(rmse_plasma_dca, rmse_liver_dca, rmse_brain_dca),
+    nrmse = c(nrmse_plasma_dca, nrmse_liver_dca, nrmse_brain_dca),
+    pseudo_r2 = c(r2_plasma_dca, r2_liver_dca, r2_brain_dca)
+  ) %>%
+    pivot_longer(
+      cols = c(half_life_hr, auc, auc_ratio_vs_plasma, rmse, nrmse, pseudo_r2),
+      names_to = "item",
+      values_to = "value"
+    ),
+  tibble(
+    compound = "DCA",
+    section = "model_summary",
+    item = c("best_starting_set", "objective_value"),
+    tissue = NA_character_,
+    value = c(best_index_dca, fit_weighted_dca$value)
+  )
+)
+```
+
+``` {r full code for tca with brain formation term, eval = FALSE}
+#Cleaning and model
+tca_wide <- tca_wide %>%
+  mutate(
+    Cp = ifelse(is.na(Cp), 0, Cp),
+    Cl = ifelse(is.na(Cl), 0, Cl),
+    Cb = ifelse(is.na(Cb), 0, Cb)
+  )
+
+pk_model_tca <- function(time, state, parms) {
+  with(as.list(c(state, parms)), {
+    
+    formation_l <- kform_liver * time * exp(-kform_decay_liver * time)
+    formation_b <- kform_brain * time * exp(-kform_decay_brain * time)
+    
+    dCp <- -kpl * Cp - kpb * Cp - kel * Cp + klp * Cl + kbp * Cb
+    dCl <-  kpl * Cp - klp * Cl + formation_l
+    dCb <-  kpb * Cp - kbp * Cb + formation_b
+    
+    list(c(dCp, dCl, dCb))
+  })
+}
+
+#Initial conditions and fitting
+state_tca <- c(
+  Cp = tca_wide$Cp[1],
+  Cl = tca_wide$Cl[1],
+  Cb = tca_wide$Cb[1]
+)
+
+tca_time_points <- tca_wide$time
+
+cost_function_weighted_tca <- function(pars) {
+  
+  parms_vector <- c(
+    kpl = pars[1],
+    kpb = pars[2],
+    klp = pars[3],
+    kbp = pars[4],
+    kel = pars[5],
+    kform_liver = pars[6],
+    kform_decay_liver = pars[7],
+    kform_brain = pars[8],
+    kform_decay_brain = pars[9]
+  )
+  
+  out <- ode(
+    y = state_tca,
+    times = tca_time_points,
+    func = pk_model_tca,
+    parms = parms_vector
+  )
+  
+  out_df <- as.data.frame(out)
+  
+  Cp_scale <- max(tca_wide$Cp, na.rm = TRUE)
+  Cl_scale <- max(tca_wide$Cl, na.rm = TRUE)
+  Cb_scale <- max(tca_wide$Cb, na.rm = TRUE)
+  
+  sum(
+    ((tca_wide$Cp - out_df$Cp) / Cp_scale)^2 +
+    ((tca_wide$Cl - out_df$Cl) / Cl_scale)^2 +
+    ((tca_wide$Cb - out_df$Cb) / Cb_scale)^2
+  )
+}
+
+start_list_tca <- list(
+  c(0.5, 0.5, 0.2, 0.05, 0.1, 10, 1.0, 1, 1.0),
+  c(0.2, 0.3, 0.1, 0.05, 0.05, 20, 1.5, 2, 1.5),
+  c(0.8, 0.2, 0.3, 0.1, 0.2, 30, 0.8, 3, 0.8),
+  c(0.3, 0.8, 0.15, 0.03, 0.1, 15, 1.5, 1.5, 1.2),
+  c(1.0, 0.4, 0.5, 0.08, 0.3, 25, 0.5, 2.5, 0.5),
+  c(0.1, 0.1, 0.1, 0.02, 0.05, 5, 0.5, 0.5, 0.5),
+  c(1.5, 0.6, 0.4, 0.1, 0.5, 50, 2.0, 5, 2.0),
+  c(0.4, 1.0, 0.2, 0.02, 0.1, 8, 0.8, 1, 0.8),
+  c(0.7, 0.3, 0.6, 0.15, 0.2, 40, 1.2, 4, 1.2),
+  c(0.25, 0.6, 0.12, 0.04, 0.08, 12, 1.3, 1.2, 1.3)
+)
+
+fit_results_tca <- vector("list", length(start_list_tca))
+fit_values_tca <- rep(NA_real_, length(start_list_tca))
+
+for (i in seq_along(start_list_tca)) {
+  fit_try <- try(
+    optim(
+      par = start_list_tca[[i]],
+      fn = cost_function_weighted_tca,
+      lower = rep(0, 9),
+      upper = c(10, 10, 10, 10, 10, 500, 10, 500, 10),
+      method = "L-BFGS-B"
+    ),
+    silent = TRUE
+  )
+  
+  if (!inherits(fit_try, "try-error")) {
+    fit_results_tca[[i]] <- fit_try
+    fit_values_tca[i] <- fit_try$value
+  }
+}
+
+best_index_tca <- which.min(fit_values_tca)
+fit_weighted_tca <- fit_results_tca[[best_index_tca]]
+
+fitted_parms_tca <- c(
+  kpl = fit_weighted_tca$par[1],
+  kpb = fit_weighted_tca$par[2],
+  klp = fit_weighted_tca$par[3],
+  kbp = fit_weighted_tca$par[4],
+  kel = fit_weighted_tca$par[5],
+  kform_liver = fit_weighted_tca$par[6],
+  kform_decay_liver = fit_weighted_tca$par[7],
+  kform_brain = fit_weighted_tca$par[8],
+  kform_decay_brain = fit_weighted_tca$par[9]
+)
+
+fitted_parms_tca
+fit_weighted_tca$value
+
+#Model fitting and plotting
+tca_fitted <- ode(
+  y = state_tca,
+  times = tca_time_points,
+  func = pk_model_tca,
+  parms = fitted_parms_tca
+)
+
+tca_fitted_df <- as.data.frame(tca_fitted)
+
+op <- par(mfrow = c(3, 1), mar = c(4, 5, 3, 2))
+
+plot(tca_wide$time, tca_wide$Cp, type = "b", pch = 16, col = "black",
+     xlab = "Time (hr)", ylab = "Plasma conc", main = "TCA Plasma")
+lines(tca_fitted_df$time, tca_fitted_df$Cp, col = "black", lty = 2, lwd = 2)
+legend("topright", legend = c("Data", "Model"),
+       col = c("black", "black"), lty = c(1, 2), pch = c(16, NA), bty = "n")
+
+plot(tca_wide$time, tca_wide$Cl, type = "b", pch = 16, col = "red",
+     xlab = "Time (hr)", ylab = "Liver conc", main = "TCA Liver")
+lines(tca_fitted_df$time, tca_fitted_df$Cl, col = "red", lty = 2, lwd = 2)
+legend("topright", legend = c("Data", "Model"),
+       col = c("red", "red"), lty = c(1, 2), pch = c(16, NA), bty = "n")
+
+plot(tca_wide$time, tca_wide$Cb, type = "b", pch = 16, col = "green3",
+     xlab = "Time (hr)", ylab = "Brain conc", main = "TCA Brain")
+lines(tca_fitted_df$time, tca_fitted_df$Cb, col = "green3", lty = 2, lwd = 2)
+legend("topright", legend = c("Data", "Model"),
+       col = c("green3", "green3"), lty = c(1, 2), pch = c(16, NA), bty = "n")
+
+par(op)
+
+#Model fit metrics
+res_plasma_tca <- tca_wide$Cp - tca_fitted_df$Cp
+res_liver_tca  <- tca_wide$Cl - tca_fitted_df$Cl
+res_brain_tca  <- tca_wide$Cb - tca_fitted_df$Cb
+
+rmse_plasma_tca <- sqrt(mean(res_plasma_tca^2, na.rm = TRUE))
+rmse_liver_tca  <- sqrt(mean(res_liver_tca^2, na.rm = TRUE))
+rmse_brain_tca  <- sqrt(mean(res_brain_tca^2, na.rm = TRUE))
+
+nrmse_plasma_tca <- rmse_plasma_tca / max(tca_wide$Cp, na.rm = TRUE)
+nrmse_liver_tca  <- rmse_liver_tca  / max(tca_wide$Cl, na.rm = TRUE)
+nrmse_brain_tca  <- rmse_brain_tca  / max(tca_wide$Cb, na.rm = TRUE)
+
+r2_plasma_tca <- 1 - sum(res_plasma_tca^2, na.rm = TRUE) /
+  sum((tca_wide$Cp - mean(tca_wide$Cp, na.rm = TRUE))^2, na.rm = TRUE)
+
+r2_liver_tca <- 1 - sum(res_liver_tca^2, na.rm = TRUE) /
+  sum((tca_wide$Cl - mean(tca_wide$Cl, na.rm = TRUE))^2, na.rm = TRUE)
+
+r2_brain_tca <- 1 - sum(res_brain_tca^2, na.rm = TRUE) /
+  sum((tca_wide$Cb - mean(tca_wide$Cb, na.rm = TRUE))^2, na.rm = TRUE)
+
+#Half-life calculations
+k_eff_plasma_tca <- fitted_parms_tca["kel"] + fitted_parms_tca["kpl"] + fitted_parms_tca["kpb"]
+
+t_half_plasma_tca <- log(2) / k_eff_plasma_tca
+t_half_liver_tca  <- log(2) / fitted_parms_tca["klp"]
+t_half_brain_tca  <- log(2) / fitted_parms_tca["kbp"]
+
+#AUC calculations
+auc_plasma_tca <- trapz(tca_wide$time, tca_wide$Cp)
+auc_liver_tca  <- trapz(tca_wide$time, tca_wide$Cl)
+auc_brain_tca  <- trapz(tca_wide$time, tca_wide$Cb)
+
+brain_plasma_ratio_tca <- auc_brain_tca / auc_plasma_tca
+liver_plasma_ratio_tca <- auc_liver_tca / auc_plasma_tca
+
+#All values
+tca_rate_constants_df <- tibble(
+  compound = "TCA",
+  parameter = names(fitted_parms_tca),
+  estimate = as.numeric(fitted_parms_tca)
+)
+
+tca_tissue_summary_df <- tibble(
+  compound = "TCA",
+  tissue = c("Plasma", "Liver", "Brain"),
+  half_life_hr = c(t_half_plasma_tca, t_half_liver_tca, t_half_brain_tca),
+  auc = c(auc_plasma_tca, auc_liver_tca, auc_brain_tca),
+  auc_ratio_vs_plasma = c(1, liver_plasma_ratio_tca, brain_plasma_ratio_tca),
+  rmse = c(rmse_plasma_tca, rmse_liver_tca, rmse_brain_tca),
+  nrmse = c(nrmse_plasma_tca, nrmse_liver_tca, nrmse_brain_tca),
+  pseudo_r2 = c(r2_plasma_tca, r2_liver_tca, r2_brain_tca)
+)
+
+tca_model_summary_df <- tibble(
+  compound = "TCA",
+  best_starting_set = best_index_tca,
+  objective_value = fit_weighted_tca$value
+)
+
+tca_combined_df <- bind_rows(
+  tibble(
+    compound = "TCA",
+    section = "rate_constant",
+    item = names(fitted_parms_tca),
+    tissue = NA_character_,
+    value = as.numeric(fitted_parms_tca)
+  ),
+  tibble(
+    compound = "TCA",
+    section = "tissue_summary",
+    tissue = c("Plasma", "Liver", "Brain"),
+    half_life_hr = c(t_half_plasma_tca, t_half_liver_tca, t_half_brain_tca),
+    auc = c(auc_plasma_tca, auc_liver_tca, auc_brain_tca),
+    auc_ratio_vs_plasma = c(1, liver_plasma_ratio_tca, brain_plasma_ratio_tca),
+    rmse = c(rmse_plasma_tca, rmse_liver_tca, rmse_brain_tca),
+    nrmse = c(nrmse_plasma_tca, nrmse_liver_tca, nrmse_brain_tca),
+    pseudo_r2 = c(r2_plasma_tca, r2_liver_tca, r2_brain_tca)
+  ) %>%
+    pivot_longer(
+      cols = c(half_life_hr, auc, auc_ratio_vs_plasma, rmse, nrmse, pseudo_r2),
+      names_to = "item",
+      values_to = "value"
+    ),
+  tibble(
+    compound = "TCA",
+    section = "model_summary",
+    item = c("best_starting_set", "objective_value"),
+    tissue = NA_character_,
+    value = c(best_index_tca, fit_weighted_tca$value)
+  )
+)
+```
+
+``` {r full code for tceoh-gluc with brain formation term, eval = FALSE}
+#Cleaning and model
+tceoh_gluc_wide <- tceoh_gluc_wide %>%
+  mutate(
+    Cp = ifelse(is.na(Cp), 0, Cp),
+    Cl = ifelse(is.na(Cl), 0, Cl),
+    Cb = ifelse(is.na(Cb), 0, Cb)
+  )
+
+pk_model_tceoh_gluc <- function(time, state, parms) {
+  with(as.list(c(state, parms)), {
+    
+    formation_l <- kform_liver * time * exp(-kform_decay_liver * time)
+    formation_b <- kform_brain * time * exp(-kform_decay_brain * time)
+    
+    dCp <- -kpl * Cp - kpb * Cp - kel * Cp + klp * Cl + kbp * Cb
+    dCl <-  kpl * Cp - klp * Cl + formation_l
+    dCb <-  kpb * Cp - kbp * Cb + formation_b
+    
+    list(c(dCp, dCl, dCb))
+  })
+}
+
+#Initial conditions and fitting
+state_tceoh_gluc <- c(
+  Cp = tceoh_gluc_wide$Cp[1],
+  Cl = tceoh_gluc_wide$Cl[1],
+  Cb = tceoh_gluc_wide$Cb[1]
+)
+
+tceoh_gluc_time_points <- tceoh_gluc_wide$time
+
+cost_function_weighted_tceoh_gluc <- function(pars) {
+  
+  parms_vector <- c(
+    kpl = pars[1],
+    kpb = pars[2],
+    klp = pars[3],
+    kbp = pars[4],
+    kel = pars[5],
+    kform_liver = pars[6],
+    kform_decay_liver = pars[7],
+    kform_brain = pars[8],
+    kform_decay_brain = pars[9]
+  )
+  
+  out <- ode(
+    y = state_tceoh_gluc,
+    times = tceoh_gluc_time_points,
+    func = pk_model_tceoh_gluc,
+    parms = parms_vector
+  )
+  
+  out_df <- as.data.frame(out)
+  
+  Cp_scale <- max(tceoh_gluc_wide$Cp, na.rm = TRUE)
+  Cl_scale <- max(tceoh_gluc_wide$Cl, na.rm = TRUE)
+  Cb_scale <- max(tceoh_gluc_wide$Cb, na.rm = TRUE)
+  
+  sum(
+    ((tceoh_gluc_wide$Cp - out_df$Cp) / Cp_scale)^2 +
+    ((tceoh_gluc_wide$Cl - out_df$Cl) / Cl_scale)^2 +
+    ((tceoh_gluc_wide$Cb - out_df$Cb) / Cb_scale)^2
+  )
+}
+
+start_list_tceoh_gluc <- list(
+  c(0.5, 0.5, 0.2, 0.05, 0.1, 10, 1.0, 1, 1.0),
+  c(0.2, 0.3, 0.1, 0.05, 0.05, 20, 1.5, 2, 1.5),
+  c(0.8, 0.2, 0.3, 0.1, 0.2, 30, 0.8, 3, 0.8),
+  c(0.3, 0.8, 0.15, 0.03, 0.1, 15, 1.5, 1.5, 1.2),
+  c(1.0, 0.4, 0.5, 0.08, 0.3, 25, 0.5, 2.5, 0.5),
+  c(0.1, 0.1, 0.1, 0.02, 0.05, 5, 0.5, 0.5, 0.5),
+  c(1.5, 0.6, 0.4, 0.1, 0.5, 50, 2.0, 5, 2.0),
+  c(0.4, 1.0, 0.2, 0.02, 0.1, 8, 0.8, 1, 0.8),
+  c(0.7, 0.3, 0.6, 0.15, 0.2, 40, 1.2, 4, 1.2),
+  c(0.25, 0.6, 0.12, 0.04, 0.08, 12, 1.3, 1.2, 1.3)
+)
+
+fit_results_tceoh_gluc <- vector("list", length(start_list_tceoh_gluc))
+fit_values_tceoh_gluc <- rep(NA_real_, length(start_list_tceoh_gluc))
+
+for (i in seq_along(start_list_tceoh_gluc)) {
+  fit_try <- try(
+    optim(
+      par = start_list_tceoh_gluc[[i]],
+      fn = cost_function_weighted_tceoh_gluc,
+      lower = rep(0, 9),
+      upper = c(10, 10, 10, 10, 10, 500, 10, 500, 10),
+      method = "L-BFGS-B"
+    ),
+    silent = TRUE
+  )
+  
+  if (!inherits(fit_try, "try-error")) {
+    fit_results_tceoh_gluc[[i]] <- fit_try
+    fit_values_tceoh_gluc[i] <- fit_try$value
+  }
+}
+
+best_index_tceoh_gluc <- which.min(fit_values_tceoh_gluc)
+fit_weighted_tceoh_gluc <- fit_results_tceoh_gluc[[best_index_tceoh_gluc]]
+
+fitted_parms_tceoh_gluc <- c(
+  kpl = fit_weighted_tceoh_gluc$par[1],
+  kpb = fit_weighted_tceoh_gluc$par[2],
+  klp = fit_weighted_tceoh_gluc$par[3],
+  kbp = fit_weighted_tceoh_gluc$par[4],
+  kel = fit_weighted_tceoh_gluc$par[5],
+  kform_liver = fit_weighted_tceoh_gluc$par[6],
+  kform_decay_liver = fit_weighted_tceoh_gluc$par[7],
+  kform_brain = fit_weighted_tceoh_gluc$par[8],
+  kform_decay_brain = fit_weighted_tceoh_gluc$par[9]
+)
+
+fitted_parms_tceoh_gluc
+fit_weighted_tceoh_gluc$value
+
+#Model fitting and plotting
+tceoh_gluc_fitted <- ode(
+  y = state_tceoh_gluc,
+  times = tceoh_gluc_time_points,
+  func = pk_model_tceoh_gluc,
+  parms = fitted_parms_tceoh_gluc
+)
+
+tceoh_gluc_fitted_df <- as.data.frame(tceoh_gluc_fitted)
+
+op <- par(mfrow = c(3, 1), mar = c(4, 5, 3, 2))
+
+plot(tceoh_gluc_wide$time, tceoh_gluc_wide$Cp, type = "b", pch = 16, col = "black",
+     xlab = "Time (hr)", ylab = "Plasma conc", main = "TCEOH-Gluc Plasma")
+lines(tceoh_gluc_fitted_df$time, tceoh_gluc_fitted_df$Cp, col = "black", lty = 2, lwd = 2)
+legend("topright", legend = c("Data", "Model"),
+       col = c("black", "black"), lty = c(1, 2), pch = c(16, NA), bty = "n")
+
+plot(tceoh_gluc_wide$time, tceoh_gluc_wide$Cl, type = "b", pch = 16, col = "red",
+     xlab = "Time (hr)", ylab = "Liver conc", main = "TCEOH-Gluc Liver")
+lines(tceoh_gluc_fitted_df$time, tceoh_gluc_fitted_df$Cl, col = "red", lty = 2, lwd = 2)
+legend("topright", legend = c("Data", "Model"),
+       col = c("red", "red"), lty = c(1, 2), pch = c(16, NA), bty = "n")
+
+plot(tceoh_gluc_wide$time, tceoh_gluc_wide$Cb, type = "b", pch = 16, col = "green3",
+     xlab = "Time (hr)", ylab = "Brain conc", main = "TCEOH-Gluc Brain")
+lines(tceoh_gluc_fitted_df$time, tceoh_gluc_fitted_df$Cb, col = "green3", lty = 2, lwd = 2)
+legend("topright", legend = c("Data", "Model"),
+       col = c("green3", "green3"), lty = c(1, 2), pch = c(16, NA), bty = "n")
+
+par(op)
+
+#Model fit metrics
+res_plasma_tceoh_gluc <- tceoh_gluc_wide$Cp - tceoh_gluc_fitted_df$Cp
+res_liver_tceoh_gluc  <- tceoh_gluc_wide$Cl - tceoh_gluc_fitted_df$Cl
+res_brain_tceoh_gluc  <- tceoh_gluc_wide$Cb - tceoh_gluc_fitted_df$Cb
+
+rmse_plasma_tceoh_gluc <- sqrt(mean(res_plasma_tceoh_gluc^2, na.rm = TRUE))
+rmse_liver_tceoh_gluc  <- sqrt(mean(res_liver_tceoh_gluc^2, na.rm = TRUE))
+rmse_brain_tceoh_gluc  <- sqrt(mean(res_brain_tceoh_gluc^2, na.rm = TRUE))
+
+nrmse_plasma_tceoh_gluc <- rmse_plasma_tceoh_gluc / max(tceoh_gluc_wide$Cp, na.rm = TRUE)
+nrmse_liver_tceoh_gluc  <- rmse_liver_tceoh_gluc  / max(tceoh_gluc_wide$Cl, na.rm = TRUE)
+nrmse_brain_tceoh_gluc  <- rmse_brain_tceoh_gluc  / max(tceoh_gluc_wide$Cb, na.rm = TRUE)
+
+r2_plasma_tceoh_gluc <- 1 - sum(res_plasma_tceoh_gluc^2, na.rm = TRUE) /
+  sum((tceoh_gluc_wide$Cp - mean(tceoh_gluc_wide$Cp, na.rm = TRUE))^2, na.rm = TRUE)
+
+r2_liver_tceoh_gluc <- 1 - sum(res_liver_tceoh_gluc^2, na.rm = TRUE) /
+  sum((tceoh_gluc_wide$Cl - mean(tceoh_gluc_wide$Cl, na.rm = TRUE))^2, na.rm = TRUE)
+
+r2_brain_tceoh_gluc <- 1 - sum(res_brain_tceoh_gluc^2, na.rm = TRUE) /
+  sum((tceoh_gluc_wide$Cb - mean(tceoh_gluc_wide$Cb, na.rm = TRUE))^2, na.rm = TRUE)
+
+#Half-life calculations
+k_eff_plasma_tceoh_gluc <- fitted_parms_tceoh_gluc["kel"] + fitted_parms_tceoh_gluc["kpl"] + fitted_parms_tceoh_gluc["kpb"]
+
+t_half_plasma_tceoh_gluc <- log(2) / k_eff_plasma_tceoh_gluc
+t_half_liver_tceoh_gluc  <- log(2) / fitted_parms_tceoh_gluc["klp"]
+t_half_brain_tceoh_gluc  <- log(2) / fitted_parms_tceoh_gluc["kbp"]
+
+#AUC calculations
+auc_plasma_tceoh_gluc <- trapz(tceoh_gluc_wide$time, tceoh_gluc_wide$Cp)
+auc_liver_tceoh_gluc  <- trapz(tceoh_gluc_wide$time, tceoh_gluc_wide$Cl)
+auc_brain_tceoh_gluc  <- trapz(tceoh_gluc_wide$time, tceoh_gluc_wide$Cb)
+
+brain_plasma_ratio_tceoh_gluc <- auc_brain_tceoh_gluc / auc_plasma_tceoh_gluc
+liver_plasma_ratio_tceoh_gluc <- auc_liver_tceoh_gluc / auc_plasma_tceoh_gluc
+
+#All values
+tceoh_gluc_rate_constants_df <- tibble(
+  compound = "TCEOH-Gluc",
+  parameter = names(fitted_parms_tceoh_gluc),
+  estimate = as.numeric(fitted_parms_tceoh_gluc)
+)
+
+tceoh_gluc_tissue_summary_df <- tibble(
+  compound = "TCEOH-Gluc",
+  tissue = c("Plasma", "Liver", "Brain"),
+  half_life_hr = c(t_half_plasma_tceoh_gluc, t_half_liver_tceoh_gluc, t_half_brain_tceoh_gluc),
+  auc = c(auc_plasma_tceoh_gluc, auc_liver_tceoh_gluc, auc_brain_tceoh_gluc),
+  auc_ratio_vs_plasma = c(1, liver_plasma_ratio_tceoh_gluc, brain_plasma_ratio_tceoh_gluc),
+  rmse = c(rmse_plasma_tceoh_gluc, rmse_liver_tceoh_gluc, rmse_brain_tceoh_gluc),
+  nrmse = c(nrmse_plasma_tceoh_gluc, nrmse_liver_tceoh_gluc, nrmse_brain_tceoh_gluc),
+  pseudo_r2 = c(r2_plasma_tceoh_gluc, r2_liver_tceoh_gluc, r2_brain_tceoh_gluc)
+)
+
+tceoh_gluc_model_summary_df <- tibble(
+  compound = "TCEOH-Gluc",
+  best_starting_set = best_index_tceoh_gluc,
+  objective_value = fit_weighted_tceoh_gluc$value
+)
+
+tceoh_gluc_combined_df <- bind_rows(
+  tibble(
+    compound = "TCEOH-Gluc",
+    section = "rate_constant",
+    item = names(fitted_parms_tceoh_gluc),
+    tissue = NA_character_,
+    value = as.numeric(fitted_parms_tceoh_gluc)
+  ),
+  tibble(
+    compound = "TCEOH-Gluc",
+    section = "tissue_summary",
+    tissue = c("Plasma", "Liver", "Brain"),
+    half_life_hr = c(t_half_plasma_tceoh_gluc, t_half_liver_tceoh_gluc, t_half_brain_tceoh_gluc),
+    auc = c(auc_plasma_tceoh_gluc, auc_liver_tceoh_gluc, auc_brain_tceoh_gluc),
+    auc_ratio_vs_plasma = c(1, liver_plasma_ratio_tceoh_gluc, brain_plasma_ratio_tceoh_gluc),
+    rmse = c(rmse_plasma_tceoh_gluc, rmse_liver_tceoh_gluc, rmse_brain_tceoh_gluc),
+    nrmse = c(nrmse_plasma_tceoh_gluc, nrmse_liver_tceoh_gluc, nrmse_brain_tceoh_gluc),
+    pseudo_r2 = c(r2_plasma_tceoh_gluc, r2_liver_tceoh_gluc, r2_brain_tceoh_gluc)
+  ) %>%
+    pivot_longer(
+      cols = c(half_life_hr, auc, auc_ratio_vs_plasma, rmse, nrmse, pseudo_r2),
+      names_to = "item",
+      values_to = "value"
+    ),
+  tibble(
+    compound = "TCEOH-Gluc",
+    section = "model_summary",
+    item = c("best_starting_set", "objective_value"),
+    tissue = NA_character_,
+    value = c(best_index_tceoh_gluc, fit_weighted_tceoh_gluc$value)
+  )
+)
+
+```
+
+``` {r adding the data to one dataframe, eval = FALSE}
+library(dplyr)
+library(tidyr)
+
+#Observed data
+obs_long <- bind_rows(
+  dca_wide %>% mutate(compound = "DCA"),
+  tca_wide %>% mutate(compound = "TCA"),
+  tceoh_gluc_wide %>% mutate(compound = "TCEOH-Gluc")
+) %>%
+  pivot_longer(cols = c(Cp, Cl, Cb),
+               names_to = "tissue",
+               values_to = "conc") %>%
+  mutate(type = "Data") %>%
+  mutate(
+    type = "Data",
+    tissue = recode(tissue,
+                    "Cp" = "Plasma",
+                    "Cl" = "Liver",
+                    "Cb" = "Brain"),
+    tissue = factor(tissue, levels = c("Liver", "Plasma", "Brain"))
+  )
+
+#Model data
+model_long <- bind_rows(
+  dca_fitted_df %>% mutate(compound = "DCA"),
+  tca_fitted_df %>% mutate(compound = "TCA"),
+  tceoh_gluc_fitted_df %>% mutate(compound = "TCEOH-Gluc")
+) %>%
+  pivot_longer(cols = c(Cp, Cl, Cb),
+               names_to = "tissue",
+               values_to = "conc") %>%
+  mutate(type = "Model") %>%
+  mutate(
+    type = "Model",
+    tissue = recode(tissue,
+                    "Cp" = "Plasma",
+                    "Cl" = "Liver",
+                    "Cb" = "Brain"),
+    tissue = factor(tissue, levels = c("Liver", "Plasma", "Brain"))
+  )
+
+#Combine
+plot_df <- bind_rows(obs_long, model_long)
+```
+
+``` {r plot, eval = FALSE}
+library(ggplot2)
+library(ggh4x)
+
+ggplot(plot_df, aes(x = time, y = conc, color = tissue)) +
+  
+  #Observed data (points + solid lines)
+  geom_point(
+    data = subset(plot_df, type == "Data")
+  ) +
+  geom_line(
+    data = subset(plot_df, type == "Data"),
+    aes(group = interaction(compound, tissue))
+  ) +
+  
+  #Model (ONLY dashed line)
+  geom_line(
+    data = subset(plot_df, type == "Model"),
+    aes(group = interaction(compound, tissue)),
+    linetype = "dashed",
+    linewidth = 1
+  ) +
+  
+  ggh4x::facet_grid2(compound ~ tissue, scales = "free_y", independent = "y") +
+  scale_x_continuous(
+  breaks = seq(0, 24, by = 4),
+  limits = c(0, 25)
+) +
+  scale_color_manual(values = c(
+    "Plasma" = "#000000",
+    "Liver"  = "#0000FF",
+    "Brain"  = "#F50717"
+  )) +
+  
+  labs(
+    x = "Time (hr)",
+    y = "Concentration (uM)",
+    title = "Toxicokinetic Profiles Across Compounds and Tissues"
+  ) +
+  
+  theme_bw() +
+  theme(
+    legend.position = "none",
+    strip.background = element_blank(),
+    strip.text.y = element_text(angle = 0),
+    plot.title = element_text(face = "bold", hjust = 0.5),
+    axis.title = element_text(face = "bold"),
+    strip.text = element_text(face = "bold")
+  )
+
+ggsave(
+  filename = "tk_profiles_brain.jpeg",
+  plot = last_plot(), 
+  width = 10,
+  height = 8,
+  units = "in",
+  dpi = 300
+)
+
+#I expected brain profiles to be better but they weren't so I don't think i should use it.
+```
