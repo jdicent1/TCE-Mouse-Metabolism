@@ -1,0 +1,660 @@
+---
+title: "All Data - Basic Stats and Prep for Metaboanalyst"
+author: "Jocelyn Dicent"
+date: "2026-06-20"
+output: html_document
+---
+```{r setup, include = FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(tidyverse)
+library(janitor)
+library(mixOmics)
+library(ggrepel)
+library(beepr)
+library(ggprism)
+```
+
+#Reading in the Data
+``` {r reading in data for brain neg}
+#Reading in MZmine CSV export
+brain_neg_raw_data <- read.csv("brain_neg_metaboanalyst.csv", 
+                     header = FALSE, 
+                     check.names = FALSE, 
+                     stringsAsFactors = FALSE)
+
+# Getting sample names and conditions
+brain_neg_sample_names <- as.character(brain_neg_raw_data[1, -1])
+brain_neg_groups <- as.character(brain_neg_raw_data[2, -1])
+
+#Creating metadata table
+brain_neg_metadata <- tibble(
+  Sample = brain_neg_sample_names,
+  Group  = brain_neg_groups
+) %>%
+  mutate(
+    Group = factor(Group, levels = c("Control", "0 hr", "1 hr", "2 hr", "4 hr", "8 hr", "24 hr")),
+    Group_clean = make.names(Group)
+  )
+```
+
+``` {r reading in data for brain pos}
+#Reading in MZmine CSV export
+brain_pos_raw_data <- read.csv("brain_pos_metaboanalyst.csv", 
+                     header = FALSE, 
+                     check.names = FALSE, 
+                     stringsAsFactors = FALSE)
+
+# Getting sample names and conditions
+brain_pos_sample_names <- as.character(brain_pos_raw_data[1, -1])
+brain_pos_groups <- as.character(brain_pos_raw_data[2, -1])
+
+#Creating metadata table
+brain_pos_metadata <- tibble(
+  Sample = brain_pos_sample_names,
+  Group  = brain_pos_groups
+) %>%
+  mutate(
+    Group = factor(Group, levels = c("Control", "0 hr", "1 hr", "2 hr", "4 hr", "8 hr", "24 hr")),
+    Group_clean = make.names(Group)
+  )
+```
+
+``` {r reading in data for liver neg}
+#Reading in MZmine CSV export
+liver_neg_raw_data <- read.csv("liver_neg_metaboanalyst.csv", 
+                     header = FALSE, 
+                     check.names = FALSE, 
+                     stringsAsFactors = FALSE)
+
+# Getting sample names and conditions
+liver_neg_sample_names <- as.character(liver_neg_raw_data[1, -1])
+liver_neg_groups <- as.character(liver_neg_raw_data[2, -1])
+
+#Creating metadata table
+liver_neg_metadata <- tibble(
+  Sample = liver_neg_sample_names,
+  Group  = liver_neg_groups
+) %>%
+  mutate(
+    Group = factor(Group, levels = c("Control", "0 hr", "1 hr", "2 hr", "4 hr", "8 hr", "24 hr")),
+    Group_clean = make.names(Group)
+  )
+```
+
+``` {r reading in data for liver pos}
+#Reading in MZmine CSV export
+liver_pos_raw_data <- read.csv("liver_pos_metaboanalyst.csv", 
+                     header = FALSE, 
+                     check.names = FALSE, 
+                     stringsAsFactors = FALSE)
+
+# Getting sample names and conditions
+liver_pos_sample_names <- as.character(liver_pos_raw_data[1, -1])
+liver_pos_groups <- as.character(liver_pos_raw_data[2, -1])
+
+#Creating metadata table
+liver_pos_metadata <- tibble(
+  Sample = liver_pos_sample_names,
+  Group  = liver_pos_groups
+) %>%
+  mutate(
+    Group = factor(Group, levels = c("Control", "0 hr", "1 hr", "2 hr", "4 hr", "8 hr", "24 hr")),
+    Group_clean = make.names(Group)
+  )
+```
+
+#Running PCA and PLS-DA
+``` {r pipeline for all PCAs and PLS-DAs}
+pca_plsda_function <- function(raw_data, metadata, out_dir, norm_standard, exclude_features, title) {
+  
+  dir.create(out_dir, showWarnings = FALSE)
+  
+  #Feature matrix
+  features_raw <- raw_data[-c(1, 2), ]
+  feature_ids <- as.character(features_raw[[1]])
+  intensity_matrix <- features_raw[, -1]
+  
+  sample_names <- as.character(raw_data[1, -1])
+  
+  intensity_matrix <- intensity_matrix %>%
+    mutate(across(everything(), ~ .x %>%
+                    str_replace_all(",", "") %>%
+                    str_trim() %>%
+                    as.numeric()
+    ))
+  
+  colnames(intensity_matrix) <- sample_names
+  rownames(intensity_matrix) <- feature_ids
+  
+  #Filter: ≥50% detection in at least one group
+  intensity_matrix_long <- intensity_matrix %>%
+    mutate(feature_ids = rownames(intensity_matrix)) %>%
+    pivot_longer(cols = -feature_ids,
+                 names_to = "Sample",
+                 values_to = "Intensity") %>%
+    left_join(metadata, by = "Sample") %>%
+    mutate(Intensity = replace_na(Intensity, 0))
+  
+  keep_features <- intensity_matrix_long %>%
+    group_by(feature_ids, Group) %>%
+    summarize(prop_nonzero = mean(Intensity > 0, na.rm = TRUE), .groups = "drop") %>%
+    group_by(feature_ids) %>%
+    summarise(keep = any(prop_nonzero >= 0.5), .groups = "drop") %>%
+    filter(keep == TRUE) %>%
+    pull(feature_ids)
+  
+  #Remove internal standards from analysis
+  intensity_matrix_filtered <- intensity_matrix %>%
+    rownames_to_column("feature_ids") %>%
+    filter(feature_ids %in% keep_features) %>%
+    { if (!is.null(exclude_features)) filter(., !feature_ids %in% exclude_features) else . } %>%
+    column_to_rownames("feature_ids")
+  
+ #LOD/2 imputation on raw intensities (LOD = minimum detected raw intensity)
+  intensity_matrix_filtered_numeric <- as.matrix(intensity_matrix_filtered)
+  
+  lod <- min(intensity_matrix_filtered_numeric[intensity_matrix_filtered_numeric > 0], na.rm = TRUE)
+  
+  intensity_matrix_filtered_numeric[is.na(intensity_matrix_filtered_numeric) |
+                                    intensity_matrix_filtered_numeric == 0] <- lod / 2
+  
+  #Normalize by internal standard
+  internal_standard <- intensity_matrix[norm_standard, ] %>%
+    as.numeric()
+  
+  intensity_matrix_imputed <- sweep(intensity_matrix_filtered_numeric, 2, internal_standard, "/") %>%
+    as.data.frame()
+  
+  #Log2 transform + scale for PCA
+  pca_data <- intensity_matrix_imputed %>%
+    mutate(across(everything(), log2)) %>%
+    as.matrix() %>%
+    t() %>%
+    scale()
+  
+  #Log2 transform only for PLS-DA
+  plsda_data <- intensity_matrix_imputed %>%
+    mutate(across(everything(), log2)) %>%
+    as.matrix() %>%
+    t()
+  
+  #PCA
+  pca_res <- prcomp(pca_data, center = FALSE, scale. = FALSE)
+  
+  pca_scores <- pca_res$x %>%
+    as.data.frame() %>%
+    rownames_to_column("Sample") %>%
+    left_join(metadata, by = "Sample")
+  
+  var_explained <- (pca_res$sdev^2) / sum(pca_res$sdev^2)
+  
+  #PCA plot
+  pca_plot <- ggplot(pca_scores, aes(x = PC1, y = PC2, color = Group)) +
+    geom_point(size = 3) +
+    stat_ellipse(aes(group = Group), linetype = 2, level = 0.95) +
+    labs(
+      x = paste0("PC1 (", round(var_explained[1] * 100, 1), "%)"),
+      y = paste0("PC2 (", round(var_explained[2] * 100, 1), "%)"),
+      title = paste0("PCA \u2014 ", title)
+    ) +
+    theme_minimal()
+  
+  ggsave(file.path(out_dir, "PCA_plot.jpg"), pca_plot, width = 7, height = 5, dpi = 300)
+  
+  #Scree plot
+  scree_df <- data.frame(
+    PC = seq_along(var_explained),
+    Variance = var_explained * 100
+  )
+  
+  scree_plot <- ggplot(scree_df[1:min(10, nrow(scree_df)), ], aes(x = PC, y = Variance)) +
+    geom_col(fill = "steelblue", color = "black", linewidth = 0.3) +
+    geom_line(color = "black") +
+    geom_point(size = 2) +
+    labs(
+      x = "Principal Component",
+      y = "Variance Explained (%)",
+      title = paste0("Scree Plot \u2014 ", title)
+    ) +
+    theme_minimal()
+  
+  ggsave(file.path(out_dir, "scree_plot.jpg"), scree_plot, width = 7, height = 5, dpi = 300)
+  
+  #PLS-DA using log2-transformed data
+  X <- plsda_data
+  Y <- metadata$Group
+  
+  set.seed(123)
+  plsda_res <- mixOmics::plsda(X, Y, ncomp = 2)
+  
+  #PLS-DA plot
+  jpeg(file.path(out_dir, "PLSDA_plot.jpg"), width = 7, height = 5, units = "in", res = 300)
+  plotIndiv(plsda_res,
+            comp = c(1, 2),
+            group = Y,
+            legend = TRUE,
+            ellipse = TRUE,
+            ind.names = FALSE,
+            title = paste0("PLS-DA \u2014 ", title))
+  dev.off()
+  
+  #PLS-DA cross-validation via perf() to assess model performance
+  set.seed(123)
+  plsda_perf <- mixOmics::perf(plsda_res,
+                                validation = "Mfold",
+                                folds = 5,
+                                nrepeat = 50,
+                                progressBar = FALSE)
+  
+  #Cross-validation error rate plot
+  jpeg(file.path(out_dir, "PLSDA_perf_plot.jpg"), width = 7, height = 5, units = "in", res = 300)
+  plot(plsda_perf, main = paste0("PLS-DA Cross-Validation \u2014 ", title))
+  dev.off()
+  
+  #VIP scores for all features
+  vip_scores <- mixOmics::vip(plsda_res)
+  
+  vip_scores_table <- vip_scores %>%
+    as.data.frame() %>%
+    tibble::rownames_to_column("feature_ids") %>%
+    dplyr::transmute(
+      feature_ids,
+      VIP = comp1
+    ) %>%
+    arrange(desc(VIP))
+  
+  #VIP plot - top 20 features
+  vip_plot <- vip_scores_table %>%
+    slice_head(n = 20) %>%
+    ggplot(aes(x = VIP, y = reorder(feature_ids, VIP))) +
+    geom_col(fill = "steelblue", color = "black", linewidth = 0.3) +
+    geom_vline(xintercept = 1, linetype = "dashed", color = "red") +
+    labs(
+      x = "VIP Score",
+      y = "Feature",
+      title = paste0("Top 20 VIP Scores \u2014 ", title)
+    ) +
+    theme_minimal()
+  
+  ggsave(file.path(out_dir, "VIP_plot.jpg"), vip_plot, width = 8, height = 6, dpi = 300)
+  
+  message("Done: ", title)
+}
+
+#Run all datasets
+pca_plsda_function(brain_neg_raw_data, brain_neg_metadata, "brain_neg",
+                   norm_standard = "3585/RAFOXANIDE/623.8134mz/8.77min",
+                   exclude_features = c("3585/RAFOXANIDE/623.8134mz/8.77min",
+                                        "372/185.0762mz/0.75min",
+                                        "240/151.0626mz/0.72min",
+                                        "218/241.0233mz/0.71min"),
+                   "Brain (Negative Mode)")
+
+pca_plsda_function(brain_pos_raw_data, brain_pos_metadata, "brain_pos",
+                   norm_standard = "3170/SPI_298.2741_15.1/298.2741mz/4.42min",
+                   exclude_features = c("3170/SPI_298.2741_15.1/298.2741mz/4.42min",
+                                        "656/153.0772mz/0.72min",
+                                        "2654/198.0977mz/2.72min"),
+                   "Brain (Positive Mode)")
+
+pca_plsda_function(liver_neg_raw_data, liver_neg_metadata, "liver_neg",
+                   norm_standard = "5638/RAFOXANIDE/623.8135mz/8.76min",
+                   exclude_features = c("5638/RAFOXANIDE/623.8135mz/8.76min",
+                                        "397/185.0762mz/0.75min",
+                                        "322/151.0626mz/0.73min"),
+                   "Liver (Negative Mode)")
+
+pca_plsda_function(liver_pos_raw_data, liver_pos_metadata, "liver_pos",
+                   norm_standard = "5402/SPI_298.2741_15.1/298.2741mz/4.42min",
+                   exclude_features = c("5402/SPI_298.2741_15.1/298.2741mz/4.42min",
+                                        "886/153.0772mz/0.74min",
+                                        "4166/198.0977mz/2.73min"),
+                   "Liver (Positive Mode)")
+
+beep()
+```
+
+#Pairwise Comparisons (mzmine-style)
+``` {r t-test and volcano plot function}
+ttest_volcano_function <- function(raw_data, metadata, out_dir, norm_standard, exclude_features, title) {
+  
+  dir.create(out_dir, showWarnings = FALSE)
+  
+  #Feature matrix
+  features_raw <- raw_data[-c(1, 2), ]
+  feature_ids <- as.character(features_raw[[1]])
+  intensity_matrix <- features_raw[, -1]
+  
+  sample_names <- as.character(raw_data[1, -1])
+  
+  intensity_matrix <- intensity_matrix %>%
+    mutate(across(everything(), ~ .x %>%
+                    str_replace_all(",", "") %>%
+                    str_trim() %>%
+                    as.numeric()
+    ))
+  
+  colnames(intensity_matrix) <- sample_names
+  rownames(intensity_matrix) <- feature_ids
+  
+  #Filter: ≥50% detection in at least one group
+  intensity_matrix_long <- intensity_matrix %>%
+    mutate(feature_ids = rownames(intensity_matrix)) %>%
+    pivot_longer(cols = -feature_ids,
+                 names_to = "Sample",
+                 values_to = "Intensity") %>%
+    left_join(metadata, by = "Sample") %>%
+    mutate(Intensity = replace_na(Intensity, 0))
+  
+  keep_features <- intensity_matrix_long %>%
+    group_by(feature_ids, Group) %>%
+    summarize(prop_nonzero = mean(Intensity > 0, na.rm = TRUE), .groups = "drop") %>%
+    group_by(feature_ids) %>%
+    summarise(keep = any(prop_nonzero >= 0.5), .groups = "drop") %>%
+    filter(keep == TRUE) %>%
+    pull(feature_ids)
+  
+  #Remove internal standards from analysis
+  intensity_matrix_filtered <- intensity_matrix %>%
+    rownames_to_column("feature_ids") %>%
+    filter(feature_ids %in% keep_features) %>%
+    { if (!is.null(exclude_features)) filter(., !feature_ids %in% exclude_features) else . } %>%
+    column_to_rownames("feature_ids")
+  
+   #LOD/2 imputation on raw intensities (LOD = minimum detected raw intensity)
+  intensity_matrix_filtered_numeric <- as.matrix(intensity_matrix_filtered)
+  
+  lod <- min(intensity_matrix_filtered_numeric[intensity_matrix_filtered_numeric > 0], na.rm = TRUE)
+  
+  intensity_matrix_filtered_numeric[is.na(intensity_matrix_filtered_numeric) |
+                                    intensity_matrix_filtered_numeric == 0] <- lod / 2
+  
+  #Normalize by internal standard
+  internal_standard <- intensity_matrix[norm_standard, ] %>%
+    as.numeric()
+  
+  intensity_matrix_imputed <- sweep(intensity_matrix_filtered_numeric, 2, internal_standard, "/") %>%
+    as.data.frame()
+  
+  #Log2 transform
+  intensity_matrix_log <- intensity_matrix_imputed %>%
+    mutate(across(everything(), log2))
+  
+  #Welch's t-tests for all pairwise comparisons
+  group_levels <- levels(metadata$Group)
+  pairwise_combos <- combn(group_levels, 2, simplify = FALSE)
+  
+  all_results <- pairwise_combos %>%
+    map_dfr(function(pair) {
+      
+      g1 <- pair[2]
+      g2 <- pair[1]
+      contrast_name <- paste0(g1, "_vs_", g2)
+      
+      message("Running: ", contrast_name)
+      
+      #Get sample names for each group
+      samples_g1 <- metadata %>% filter(Group == g1) %>% pull(Sample)
+      samples_g2 <- metadata %>% filter(Group == g2) %>% pull(Sample)
+      
+      #Run Welch's t-test per feature
+      results <- intensity_matrix_log %>%
+        rownames_to_column("feature_ids") %>%
+        rowwise() %>%
+        mutate(
+          vals_g1 = list(as.numeric(c_across(all_of(samples_g1)))),
+          vals_g2 = list(as.numeric(c_across(all_of(samples_g2)))),
+          mean_g1 = mean(unlist(vals_g1), na.rm = TRUE),
+          mean_g2 = mean(unlist(vals_g2), na.rm = TRUE),
+          logFC   = mean_g1 - mean_g2,
+          t.score = tryCatch(
+            t.test(unlist(vals_g1), unlist(vals_g2), var.equal = FALSE)$statistic,
+            error = function(e) NA_real_
+          ),
+          p.value = tryCatch(
+            t.test(unlist(vals_g1), unlist(vals_g2), var.equal = FALSE)$p.value,
+            error = function(e) NA_real_
+          )
+        ) %>%
+        ungroup() %>%
+        mutate(
+          adj.p.value = p.adjust(p.value, method = "BH"),
+          negLogP = -log10(p.value),
+          Significance = case_when(
+            adj.p.value < 0.05 ~ "FDR < 0.05",
+            p.value < 0.05     ~ "p < 0.05",
+            TRUE               ~ "p \u2265 0.05"
+          ),
+          Contrast = contrast_name
+        ) %>%
+        dplyr::select(feature_ids, logFC, t.score, p.value, adj.p.value, negLogP, Significance, Contrast)
+      
+      #Volcano plot
+      p_volc <- results %>%
+        filter(!is.na(p.value)) %>%
+        ggplot(aes(logFC, negLogP, color = Significance)) +
+        geom_point(alpha = 0.6) +
+        scale_color_manual(values = c(
+          "p \u2265 0.05" = "black",
+          "p < 0.05"     = "blue",
+          "FDR < 0.05"   = "red"
+        )) +
+        geom_hline(yintercept = -log10(0.05), linetype = 2, color = "blue") +
+        labs(
+          title = paste("Volcano:", contrast_name),
+          x = "log2 Fold Change",
+          y = "-log10(P-value)"
+        ) +
+        theme_minimal()
+      
+      ggsave(
+        file.path(out_dir, paste0("Volcano_", contrast_name, ".jpg")),
+        plot = p_volc,
+        width = 7, height = 5, dpi = 300
+      )
+      
+      #Save all results per contrast
+      write.csv(
+        results,
+        file.path(out_dir, paste0("All_Features_", contrast_name, ".csv")),
+        row.names = FALSE
+      )
+      
+      results
+    })
+  
+  #Save combined results
+  all_results_wide <- all_results %>%
+    dplyr::select(feature_ids, Contrast, logFC, p.value, adj.p.value) %>%
+    pivot_wider(
+      names_from  = Contrast,
+      values_from = c(logFC, p.value, adj.p.value),
+      names_glue  = "{Contrast}_{.value}"
+    )
+  
+  write.csv(
+    all_results_wide,
+    file.path(out_dir, "All_Features_Combined.csv"),
+    row.names = FALSE
+  )
+  
+  message("Done: ", title)
+  return(all_results)
+}
+
+#Run all datasets
+brain_neg_results <- ttest_volcano_function(brain_neg_raw_data, brain_neg_metadata, "brain_neg",
+                       norm_standard = "3585/RAFOXANIDE/623.8134mz/8.77min",
+                       exclude_features = c("3585/RAFOXANIDE/623.8134mz/8.77min",
+                                            "372/185.0762mz/0.75min",
+                                            "240/151.0626mz/0.72min",
+                                            "218/241.0233mz/0.71min"),
+                       "Brain (Negative Mode)")
+
+brain_pos_results <- ttest_volcano_function(brain_pos_raw_data, brain_pos_metadata, "brain_pos",
+                       norm_standard = "3170/SPI_298.2741_15.1/298.2741mz/4.42min",
+                       exclude_features = c("3170/SPI_298.2741_15.1/298.2741mz/4.42min",
+                                            "656/153.0772mz/0.72min",
+                                            "2654/198.0977mz/2.72min"),
+                       "Brain (Positive Mode)")
+
+liver_neg_results <- ttest_volcano_function(liver_neg_raw_data, liver_neg_metadata, "liver_neg",
+                       norm_standard = "5638/RAFOXANIDE/623.8135mz/8.76min",
+                       exclude_features = c("5638/RAFOXANIDE/623.8135mz/8.76min",
+                                            "397/185.0762mz/0.75min",
+                                            "322/151.0626mz/0.73min"),
+                       "Liver (Negative Mode)")
+
+liver_pos_results <- ttest_volcano_function(liver_pos_raw_data, liver_pos_metadata, "liver_pos",
+                       norm_standard = "5402/SPI_298.2741_15.1/298.2741mz/4.42min",
+                       exclude_features = c("5402/SPI_298.2741_15.1/298.2741mz/4.42min",
+                                            "886/153.0772mz/0.74min",
+                                            "4166/198.0977mz/2.73min"),
+                       "Liver (Positive Mode)")
+
+beep()
+```
+
+#Prepare Data for Metaboanalyst Analysis
+``` {r mummichog prep}
+mummichog_prep_function <- function(results, title, mummichog_dir, mode) {
+  
+  dir.create(mummichog_dir, showWarnings = FALSE)
+  
+  #Filter for Control vs 4 hr and parse m/z and RT from feature_ids
+  mummichog_table <- results %>%
+    filter(Contrast == "4 hr_vs_Control") %>%
+    filter(!is.na(p.value)) %>%
+    mutate(
+      parts   = purrr::map(feature_ids, ~ str_trim(str_split(.x, "/")[[1]])),
+      RT      = purrr::map_chr(parts, ~ .x[length(.x)]),
+      m_z_raw = purrr::map_chr(parts, ~ .x[length(.x) - 1]),
+      m.z     = as.numeric(str_remove(m_z_raw, "mz")),
+      r.t     = as.numeric(str_remove(RT, "min")),
+      mode    = mode
+    ) %>%
+    dplyr::select(m.z, r.t, p.value, t.score, mode)
+  
+  #Export individual mode file
+  write.table(
+    mummichog_table,
+    file = file.path(mummichog_dir, paste0(title, "_4hr_vs_Control.txt")),
+    sep = "\t",
+    quote = FALSE,
+    row.names = FALSE
+  )
+  
+  message("Done: ", title)
+  
+  return(mummichog_table)
+}
+
+#Run mummichog prep and store results
+brain_neg_mummichog <- mummichog_prep_function(brain_neg_results, "brain_neg", "mummichog_input", mode = "negative")
+brain_pos_mummichog <- mummichog_prep_function(brain_pos_results, "brain_pos", "mummichog_input", mode = "positive")
+liver_neg_mummichog <- mummichog_prep_function(liver_neg_results, "liver_neg", "mummichog_input", mode = "negative")
+liver_pos_mummichog <- mummichog_prep_function(liver_pos_results, "liver_pos", "mummichog_input", mode = "positive")
+
+#Create mixed mode files by combining neg and pos for brain and liver
+brain_mixed <- bind_rows(brain_neg_mummichog, brain_pos_mummichog)
+liver_mixed <- bind_rows(liver_neg_mummichog, liver_pos_mummichog)
+
+write.table(
+  brain_mixed,
+  file = file.path("mummichog_input", "brain_mixed_4hr_vs_Control.txt"),
+  sep = "\t",
+  quote = FALSE,
+  row.names = FALSE
+)
+
+write.table(
+  liver_mixed,
+  file = file.path("mummichog_input", "liver_mixed_4hr_vs_Control.txt"),
+  sep = "\t",
+  quote = FALSE,
+  row.names = FALSE
+)
+```
+
+``` {r p-values for Metaboanalyst}
+#Calculate p-value cutoff for top 10% of features for each dataset
+brain_neg_cutoff <- quantile(brain_neg_mummichog$p.value, probs = 0.10, na.rm = TRUE)
+brain_pos_cutoff <- quantile(brain_pos_mummichog$p.value, probs = 0.10, na.rm = TRUE)
+liver_neg_cutoff <- quantile(liver_neg_mummichog$p.value, probs = 0.10, na.rm = TRUE)
+liver_pos_cutoff <- quantile(liver_pos_mummichog$p.value, probs = 0.10, na.rm = TRUE)
+brain_mixed_cutoff <- quantile(brain_mixed$p.value, probs = 0.10, na.rm = TRUE)
+liver_mixed_cutoff <- quantile(liver_mixed$p.value, probs = 0.10, na.rm = TRUE)
+
+print(brain_neg_cutoff)
+print(brain_pos_cutoff)
+print(liver_neg_cutoff)
+print(liver_pos_cutoff)
+print(brain_mixed_cutoff)
+print(liver_mixed_cutoff)
+
+beep()
+```
+
+#Extra
+``` {r feature plot - unknown chlorinated compound}
+feature_boxplot <- function(raw_data, metadata, feature_id, norm_standard = NULL,
+                            y_label = "Peak Area", title = feature_id, out_file = NULL) {
+  
+  #Helper: convert a row of the raw CSV to numbers
+  to_num <- function(row) {
+    row %>% unlist() %>% as.character() %>%
+      str_replace_all(",", "") %>% str_trim() %>% as.numeric()
+  }
+  
+  sample_names <- as.character(raw_data[1, -1])
+  ids <- str_trim(as.character(raw_data[[1]]))
+  
+  if (!feature_id %in% ids) stop("Feature not found: ", feature_id)
+  
+  values <- to_num(raw_data[ids == feature_id, -1])
+  
+  #Optional: normalize to internal standard
+  if (!is.null(norm_standard)) {
+    if (!norm_standard %in% ids) stop("Internal standard not found: ", norm_standard)
+    values <- values / to_num(raw_data[ids == norm_standard, -1])
+    y_label <- paste0(y_label, " (normalized to IS)")
+  }
+  
+  #Treat 0 as not detected so it isn't plotted
+  plot_df <- tibble(Sample = sample_names, Intensity = values) %>%
+    left_join(metadata, by = "Sample") %>%
+    mutate(Intensity = if_else(Intensity == 0, NA_real_, Intensity))
+  
+  #Report how many samples per group were detected
+  plot_df %>%
+    group_by(Group) %>%
+    summarise(detected = sum(!is.na(Intensity)), total = n(), .groups = "drop") %>%
+    print()
+  
+  p <- plot_df %>%
+    filter(!is.na(Intensity)) %>%
+    ggplot(aes(x = Group, y = Intensity, fill = Group)) +
+    geom_boxplot(outlier.shape = NA, alpha = 0.6) +
+    geom_jitter(width = 0.15, size = 2) +
+    scale_x_discrete(drop = FALSE) +
+    scale_y_continuous(labels = scales::label_scientific()) +
+    labs(x = "Condition", y = y_label, title = title) +
+    theme_prism(base_size = 14, base_fontface = "plain") +
+    theme(legend.position = "none",
+          plot.title = element_text(face = "bold"),
+          axis.title = element_text(face = "bold"),
+          axis.text  = element_text(size = 10))
+    theme(legend.position = "none",
+          plot.title = element_text(face = "bold"))
+  
+  if (!is.null(out_file)) ggsave(out_file, p, width = 7, height = 5, dpi = 300)
+  
+  p
+}
+
+feature_boxplot(brain_neg_raw_data, brain_neg_metadata,
+                feature_id = "2153/116.9072mz/4.02min",
+                title = "m/z 116.9072 — Brain (Negative Mode)",
+                out_file = "boxplots/brain_neg_116.9072.jpg")
+```
+
