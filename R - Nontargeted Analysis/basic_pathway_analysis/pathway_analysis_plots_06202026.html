@@ -357,7 +357,8 @@ display: none;
 </div>
 
 
-<p>#Reading in the Data</p>
+<div id="reading-in-the-data" class="section level1">
+<h1>Reading in the Data</h1>
 <pre class="r"><code>#First, read in the data from MetaboAnalyst functional analysis module. &quot;mm&quot; means mixed mode and &quot;pe&quot; means pathway enrichment. I used gsub to clean a few pathway names after reading in the data and inspecting it.
 
 brain_mm_biocyc_pe &lt;- read_csv(&quot;mummichog_pathway_enrichment_mummichog_brain_biocyc.csv&quot;) %&gt;%
@@ -413,7 +414,9 @@ brain_mm_biocyc_pe &lt;- read_csv(&quot;mummichog_pathway_enrichment_mummichog_b
 ## ℹ Use `spec()` to retrieve the full column specification for this data. ℹ
 ## Specify the column types or set `show_col_types = FALSE` to quiet this message.
 ## • `` -&gt; `...1`</code></pre>
-<p>#Calculations for Remaking Plots</p>
+</div>
+<div id="calculations-for-remaking-plots" class="section level1">
+<h1>Calculations for Remaking Plots</h1>
 <pre class="r"><code>#Using MetaboAnalyst, it generates plots with 4 dimensions: -log10(p) (y-axis), &quot;radi.vec&quot; (size), -log10(p) (color), and enrichment factor (x-axis). radi.vec and enrichment factor are not exported with the MetaboAnalyst data. Enrichment factor was calculated, while radi.vec was omitted since no information about how it is calculated internally could be found.
 
 additional_variables &lt;- function(df) {
@@ -482,7 +485,9 @@ over_enriched_liver_mm_kegg_pe &lt;- liver_mm_kegg_pe %&gt;%
     enrichment_factor &gt; 1
   ) %&gt;%
   arrange(desc(enrichment_factor)) </code></pre>
-<p>#Bar Plots - BioCyc</p>
+</div>
+<div id="bar-plots---biocyc" class="section level1">
+<h1>Bar Plots - BioCyc</h1>
 <pre class="r"><code>#Prism-style themes
 theme_prism_10 &lt;- theme_bw(base_size = 10) +
   theme(
@@ -513,7 +518,9 @@ theme_prism_7 &lt;- theme_bw(base_size = 7) +
     legend.key = element_blank(),
     plot.title = element_text(face = &quot;bold&quot;)
   )</code></pre>
-<p>#Bar Plots - BioCyc</p>
+</div>
+<div id="bar-plots---biocyc-1" class="section level1">
+<h1>Bar Plots - BioCyc</h1>
 <pre class="r"><code>#Plots were filtered such that only the near significant and significant results are shown.
 
 #Bar plot - all pathways
@@ -572,7 +579,9 @@ brain_mm_biocyc_pe_alt &lt;- brain_mm_biocyc_pe %&gt;%
   height = 5,
   dpi = 300
 )</code></pre>
-<p>#Bar Plots - KEGG</p>
+</div>
+<div id="bar-plots---kegg" class="section level1">
+<h1>Bar Plots - KEGG</h1>
 <pre class="r"><code>brain_mm_kegg_pe %&gt;%
   slice_max(neg_log10_p, n = 5) %&gt;%
   ggplot(aes(
@@ -625,6 +634,7 @@ brain_mm_biocyc_pe_alt &lt;- brain_mm_biocyc_pe %&gt;%
   height = 5,
   dpi = 300
 )</code></pre>
+</div>
 
 
 

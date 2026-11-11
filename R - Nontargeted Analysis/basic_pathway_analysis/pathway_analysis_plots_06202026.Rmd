@@ -13,7 +13,7 @@ library(ggplot2)
 library(scales)
 ```
 
-#Reading in the Data
+# Reading in the Data
 ``` {r read in the data - brain}
 #First, read in the data from MetaboAnalyst functional analysis module. "mm" means mixed mode and "pe" means pathway enrichment. I used gsub to clean a few pathway names after reading in the data and inspecting it.
 
@@ -41,7 +41,7 @@ liver_mm_kegg_pe <- read_csv("mummichog_pathway_enrichment_mummichog_liver_kegg.
   mutate(pathway = gsub("</?i>", "", pathway))
 ```
 
-#Calculations for Remaking Plots
+# Calculations for Remaking Plots
 ``` {r calculating enrichment factor and -log10p - both matrices}
 #Using MetaboAnalyst, it generates plots with 4 dimensions: -log10(p) (y-axis), "radi.vec" (size), -log10(p) (color), and enrichment factor (x-axis). radi.vec and enrichment factor are not exported with the MetaboAnalyst data. Enrichment factor was calculated, while radi.vec was omitted since no information about how it is calculated internally could be found.
 
@@ -119,7 +119,7 @@ over_enriched_liver_mm_kegg_pe <- liver_mm_kegg_pe %>%
   arrange(desc(enrichment_factor)) 
 ```
 
-#Bar Plots - BioCyc
+# Bar Plots - BioCyc
 ``` {r plotting prep}
 #Prism-style themes
 theme_prism_10 <- theme_bw(base_size = 10) +
@@ -153,7 +153,7 @@ theme_prism_7 <- theme_bw(base_size = 7) +
   )
 ```
 
-#Bar Plots - BioCyc
+# Bar Plots - BioCyc
 ``` {r Bar plots - all pathways - brain}
 #Plots were filtered such that only the near significant and significant results are shown.
 
@@ -218,7 +218,7 @@ ggsave(
 )
 ```
 
-#Bar Plots - KEGG
+# Bar Plots - KEGG
 ``` {r bar plots - all pathways - brain}
 brain_mm_kegg_pe %>%
   slice_max(neg_log10_p, n = 5) %>%
