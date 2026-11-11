@@ -13,14 +13,14 @@ library(readr)
 library(readxl)
 ```
 
-#Reading in the Predicted Concentrations
+# Reading in the Predicted Concentrations
 ``` {r reading in the predicted concentrations}
 tissue_raw <- read_excel("all_samples_predicted_conc_data_final_tissue.xlsx")
 
 plasma_raw <- read_excel("all_samples_predicted_conc_data_final_plasma.xlsx")
 ```
 
-#Separating by Metabolite
+# Separating by Metabolite
 ``` {r cleaning the data}
 plasma_cleaned <- plasma_raw %>%
   mutate(tissue = "pl") %>%
@@ -135,7 +135,7 @@ tceoh_gluc_wide <- tceoh_gluc_avg %>%
   arrange(time)
 ```
 
-#Compartment Models - DCA
+# Compartment Models - DCA
 ``` {r cleaning and models - DCA}
 library(deSolve)
 library(dplyr)
@@ -425,7 +425,7 @@ dca_combined_df <- bind_rows(
 )
 ```
 
-#Compartment Models - TCA
+# Compartment Models - TCA
 ``` {r cleaning and models - TCA}
 library(deSolve)
 library(dplyr)
@@ -707,7 +707,7 @@ tca_combined_df <- bind_rows(
 )
 ```
 
-#Compartment Models - TCEOH-Gluc
+# Compartment Models - TCEOH-Gluc
 ``` {r cleaning and models - TCEOH-Gluc}
 library(deSolve)
 library(dplyr)
@@ -988,13 +988,13 @@ tceoh_gluc_combined_df <- bind_rows(
 )
 ```
 
-#All Values Across Compounds
+# All Values Across Compounds
 ``` {r combining datasets}
 final_all_values <- bind_rows(dca_combined_df, tca_combined_df, tceoh_gluc_combined_df) %>%
   mutate(value = round(value, 4))
 ```
 
-#Nine Panel Graph
+# Nine Panel Graph
 ``` {r adding all data to one dataframe}
 library(dplyr)
 library(tidyr)
@@ -1108,7 +1108,7 @@ beep()
 
 ```
 
-#Sensitivity Analysis - Including Brain Formation
+# Sensitivity Analysis - Including Brain Formation
 ``` {r full code for dca with brain formation term, eval = FALSE}
 library(deSolve)
 library(dplyr)

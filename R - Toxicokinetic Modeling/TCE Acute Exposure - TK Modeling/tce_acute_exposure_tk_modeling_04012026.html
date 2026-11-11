@@ -357,11 +357,14 @@ display: none;
 </div>
 
 
-<p>#Reading in the Predicted Concentrations</p>
+<div id="reading-in-the-predicted-concentrations" class="section level1">
+<h1>Reading in the Predicted Concentrations</h1>
 <pre class="r"><code>tissue_raw &lt;- read_excel(&quot;all_samples_predicted_conc_data_final_tissue.xlsx&quot;)
 
 plasma_raw &lt;- read_excel(&quot;all_samples_predicted_conc_data_final_plasma.xlsx&quot;)</code></pre>
-<p>#Separating by Metabolite</p>
+</div>
+<div id="separating-by-metabolite" class="section level1">
+<h1>Separating by Metabolite</h1>
 <pre class="r"><code>plasma_cleaned &lt;- plasma_raw %&gt;%
   mutate(tissue = &quot;pl&quot;) %&gt;%
   select(compound, tissue, treatment, pred_conc)
@@ -458,7 +461,9 @@ tceoh_gluc_wide &lt;- tceoh_gluc_avg %&gt;%
     Cb = rb   
   ) %&gt;%
   arrange(time)</code></pre>
-<p>#Compartment Models - DCA</p>
+</div>
+<div id="compartment-models---dca" class="section level1">
+<h1>Compartment Models - DCA</h1>
 <pre class="r"><code>library(deSolve)
 library(dplyr)
 
@@ -739,7 +744,9 @@ dca_combined_df &lt;- bind_rows(
     value = c(best_index, fit_weighted$value)
   )
 )</code></pre>
-<p>#Compartment Models - TCA</p>
+</div>
+<div id="compartment-models---tca" class="section level1">
+<h1>Compartment Models - TCA</h1>
 <pre class="r"><code>library(deSolve)
 library(dplyr)
 
@@ -1005,7 +1012,9 @@ tca_combined_df &lt;- bind_rows(
     value = c(best_index, fit_weighted$value)
   )
 )</code></pre>
-<p>#Compartment Models - TCEOH-Gluc</p>
+</div>
+<div id="compartment-models---tceoh-gluc" class="section level1">
+<h1>Compartment Models - TCEOH-Gluc</h1>
 <pre class="r"><code>library(deSolve)
 library(dplyr)
 
@@ -1270,10 +1279,14 @@ tceoh_gluc_combined_df &lt;- bind_rows(
     value = c(best_index, fit_weighted$value)
   )
 )</code></pre>
-<p>#All Values Across Compounds</p>
+</div>
+<div id="all-values-across-compounds" class="section level1">
+<h1>All Values Across Compounds</h1>
 <pre class="r"><code>final_all_values &lt;- bind_rows(dca_combined_df, tca_combined_df, tceoh_gluc_combined_df) %&gt;%
   mutate(value = round(value, 4))</code></pre>
-<p>#Nine Panel Graph</p>
+</div>
+<div id="nine-panel-graph" class="section level1">
+<h1>Nine Panel Graph</h1>
 <pre class="r"><code>library(dplyr)
 library(tidyr)
 
@@ -1381,7 +1394,9 @@ ggplot(plot_df, aes(x = time, y = conc, color = tissue)) +
 ## 
 ##     beep</code></pre>
 <pre class="r"><code>beep()</code></pre>
-<p>#Sensitivity Analysis - Including Brain Formation</p>
+</div>
+<div id="sensitivity-analysis---including-brain-formation" class="section level1">
+<h1>Sensitivity Analysis - Including Brain Formation</h1>
 <pre class="r"><code>library(deSolve)
 library(dplyr)
 library(tidyr)
@@ -2220,6 +2235,7 @@ ggsave(
 )
 
 #I expected brain profiles to be better but they weren&#39;t so I don&#39;t think i should use it.</code></pre>
+</div>
 
 
 
