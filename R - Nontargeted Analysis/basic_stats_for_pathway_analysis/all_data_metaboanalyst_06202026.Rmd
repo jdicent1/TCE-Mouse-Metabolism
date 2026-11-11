@@ -14,7 +14,7 @@ library(beepr)
 library(ggprism)
 ```
 
-#Reading in the Data
+# Reading in the Data
 ``` {r reading in data for brain neg}
 #Reading in MZmine CSV export
 brain_neg_raw_data <- read.csv("brain_neg_metaboanalyst.csv", 
@@ -103,7 +103,7 @@ liver_pos_metadata <- tibble(
   )
 ```
 
-#Running PCA and PLS-DA
+# Running PCA and PLS-DA
 ``` {r pipeline for all PCAs and PLS-DAs}
 pca_plsda_function <- function(raw_data, metadata, out_dir, norm_standard, exclude_features, title) {
   
@@ -314,7 +314,7 @@ pca_plsda_function(liver_pos_raw_data, liver_pos_metadata, "liver_pos",
 beep()
 ```
 
-#Pairwise Comparisons (mzmine-style)
+# Pairwise Comparisons (mzmine-style)
 ``` {r t-test and volcano plot function}
 ttest_volcano_function <- function(raw_data, metadata, out_dir, norm_standard, exclude_features, title) {
   
@@ -515,7 +515,7 @@ liver_pos_results <- ttest_volcano_function(liver_pos_raw_data, liver_pos_metada
 beep()
 ```
 
-#Prepare Data for Metaboanalyst Analysis
+# Prepare Data for Metaboanalyst Analysis
 ``` {r mummichog prep}
 mummichog_prep_function <- function(results, title, mummichog_dir, mode) {
   
@@ -595,7 +595,7 @@ print(liver_mixed_cutoff)
 beep()
 ```
 
-#Extra
+# Extra
 ``` {r feature plot - unknown chlorinated compound}
 feature_boxplot <- function(raw_data, metadata, feature_id, norm_standard = NULL,
                             y_label = "Peak Area", title = feature_id, out_file = NULL) {
